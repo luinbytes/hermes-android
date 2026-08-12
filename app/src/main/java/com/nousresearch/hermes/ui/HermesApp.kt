@@ -1898,6 +1898,7 @@ private fun SessionRail(
     }
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val drawerScope = rememberCoroutineScope()
+    val timeFormat = android.text.format.DateFormat.getTimeFormat(LocalContext.current)
     var timestampNowMillis by remember { mutableLongStateOf(System.currentTimeMillis()) }
     LaunchedEffect(Unit) {
         while (true) {
@@ -2017,12 +2018,15 @@ private fun SessionRail(
                         }
                         items(sessions, key = { "${it.profile}:${it.durableId}" }) { session ->
                             val selected = state.activeStoredSession?.durableId == session.durableId
+                            val active = session.isActive || (selected && state.runtimeSessionId != null)
                             val displayedBackendId = state.backend?.id.orEmpty()
                             SessionRow(
                                 session = session,
                                 selected = selected,
                                 compact = compact,
                                 nowMillis = timestampNowMillis,
+                                active = active,
+                                timeFormat = timeFormat,
                                 onClick = { onSession(session) },
                                 onPin = if (session.pinned != null) {
                                     { onPinSession(displayedBackendId, session) }
@@ -2047,7 +2051,7 @@ private fun SessionRail(
                         }
                     }
                     items(remoteResults, key = { "search:${it.profile}:${it.sessionId}" }) { result ->
-                        SearchResultRow(result) {
+                        SearchResultRow(result, timestampNowMillis, timeFormat) {
                             onSession(
                                 StoredSession(
                                     sessionId = result.sessionId,
@@ -2170,7 +2174,12 @@ private fun SessionRail(
 }
 
 @Composable
-private fun SearchResultRow(result: SessionSearchHit, onClick: () -> Unit) {
+private fun SearchResultRow(
+    result: SessionSearchHit,
+    nowMillis: Long,
+    timeFormat: java.text.DateFormat,
+    onClick: () -> Unit,
+) {
     Column(Modifier.fillMaxWidth()) {
         Surface(
             onClick = onClick,
@@ -2205,7 +2214,8 @@ private fun SearchResultRow(result: SessionSearchHit, onClick: () -> Unit) {
                         overflow = TextOverflow.Ellipsis,
                     )
                 }
-                formatSessionTimestamp(result.sessionStarted).takeIf(String::isNotEmpty)?.let { timestamp ->
+                formatSessionTimestamp(result.sessionStarted, nowMillis, timeFormat = timeFormat)
+                    .takeIf(String::isNotEmpty)?.let { timestamp ->
                     Spacer(Modifier.width(8.dp))
                     Text(timestamp, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
@@ -2270,6 +2280,8 @@ internal fun SessionRow(
     selected: Boolean,
     compact: Boolean,
     nowMillis: Long,
+    active: Boolean,
+    timeFormat: java.text.DateFormat? = null,
     onClick: () -> Unit,
     onPin: (() -> Unit)?,
     onArchive: () -> Unit,
@@ -2280,8 +2292,7 @@ internal fun SessionRow(
     val layoutDirection = LocalLayoutDirection.current
     val openOffset = if (layoutDirection == LayoutDirection.Rtl) actionWidthPx else -actionWidthPx
     val summary = sessionSummary(session)
-    val timestamp = formatSessionTimestamp(session.lastActive, nowMillis)
-    val active = selected || session.isActive
+    val timestamp = formatSessionTimestamp(session.lastActive, nowMillis, timeFormat = timeFormat)
     val sessionDescription = listOfNotNull(
         session.displayTitle,
         summary,
@@ -2471,13 +2482,15 @@ internal fun formatSessionTimestamp(
     nowMillis: Long = System.currentTimeMillis(),
     zoneId: ZoneId = ZoneId.systemDefault(),
     locale: Locale = Locale.getDefault(),
+    timeFormat: java.text.DateFormat? = null,
 ): String {
     if (!epochSeconds.isFinite() || epochSeconds <= 0.0) return ""
     val value = runCatching { Instant.ofEpochMilli((epochSeconds * 1_000).toLong()).atZone(zoneId) }.getOrNull() ?: return ""
     val now = Instant.ofEpochMilli(nowMillis).atZone(zoneId)
     val daysAgo = ChronoUnit.DAYS.between(value.toLocalDate(), now.toLocalDate())
     return when {
-        daysAgo == 0L -> value.format(DateTimeFormatter.ofLocalizedTime(FormatStyle.SHORT).withLocale(locale))
+        daysAgo == 0L -> timeFormat?.format(java.util.Date(value.toInstant().toEpochMilli()))
+            ?: value.format(DateTimeFormatter.ofLocalizedTime(FormatStyle.SHORT).withLocale(locale))
         daysAgo == 1L -> "Yesterday"
         daysAgo in 2L..6L -> value.format(DateTimeFormatter.ofPattern("EEE", locale))
         value.year == now.year -> value.format(DateTimeFormatter.ofPattern("MMM d", locale))

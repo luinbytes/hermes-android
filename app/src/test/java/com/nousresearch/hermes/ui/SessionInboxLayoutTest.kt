@@ -16,7 +16,9 @@ import com.nousresearch.hermes.protocol.StoredSession
 import com.nousresearch.hermes.ui.theme.HermesTheme
 import java.time.Instant
 import java.time.ZoneId
+import java.text.SimpleDateFormat
 import java.util.Locale
+import java.util.TimeZone
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -39,6 +41,11 @@ class SessionInboxLayoutTest {
     @Test
     fun conversationRowFitsExpandedRailAtLargeText() {
         assertConversationRowFits(width = 330, compact = false, click = false)
+    }
+
+    @Test
+    fun selectedConversationDoesNotAnnounceAnInactiveRuntime() {
+        assertConversationRowFits(width = 360, compact = true, click = false, active = false)
     }
 
     @Test
@@ -72,6 +79,14 @@ class SessionInboxLayoutTest {
         assertEquals("Jul 2", formatSessionTimestamp(epoch("2026-07-02T09:15:00Z"), now, zone, locale))
         assertEquals("Dec 31, 2025", formatSessionTimestamp(epoch("2025-12-31T09:15:00Z"), now, zone, locale))
         assertEquals("", formatSessionTimestamp(0.0, now, zone, locale))
+
+        val deviceTimeFormat = SimpleDateFormat("HH:mm", locale).apply {
+            timeZone = TimeZone.getTimeZone(zone)
+        }
+        assertEquals(
+            "09:15",
+            formatSessionTimestamp(epoch("2026-08-12T09:15:00Z"), now, zone, locale, deviceTimeFormat),
+        )
     }
 
     @Test
@@ -81,7 +96,7 @@ class SessionInboxLayoutTest {
         assertEquals(30_000L, sessionTimestampRolloverDelayMillis(now, ZoneId.of("UTC")))
     }
 
-    private fun assertConversationRowFits(width: Int, compact: Boolean, click: Boolean) {
+    private fun assertConversationRowFits(width: Int, compact: Boolean, click: Boolean, active: Boolean = true) {
         var clicks = 0
         compose.setContent {
             HermesTheme {
@@ -98,6 +113,7 @@ class SessionInboxLayoutTest {
                             selected = true,
                             compact = compact,
                             nowMillis = 0L,
+                            active = active,
                             onClick = { clicks += 1 },
                             onPin = {},
                             onArchive = {},
@@ -111,10 +127,13 @@ class SessionInboxLayoutTest {
         val row = compose.onNode(
             hasContentDescription("Release planning", substring = true) and
                 hasContentDescription("default · hermes-4 · 12 messages", substring = true) and
-                hasContentDescription("Active", substring = true) and
                 hasContentDescription("Pinned", substring = true),
         )
         row.assertExists()
+        compose.onNode(
+            hasContentDescription("Release planning", substring = true) and
+                hasContentDescription("Active", substring = true),
+        ).run { if (active) assertExists() else assertDoesNotExist() }
         if (click) row.performClick()
 
         val rootWidth = compose.onNodeWithTag("inbox-root").fetchSemanticsNode().boundsInRoot.width
