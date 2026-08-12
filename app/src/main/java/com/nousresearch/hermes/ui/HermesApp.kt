@@ -136,6 +136,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -1897,6 +1898,14 @@ private fun SessionRail(
     }
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val drawerScope = rememberCoroutineScope()
+    var timestampNowMillis by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            val currentMillis = System.currentTimeMillis()
+            delay(sessionTimestampRolloverDelayMillis(currentMillis))
+            timestampNowMillis = System.currentTimeMillis()
+        }
+    }
     val startNewSession = {
         if (state.runtimeSessionId == null) onNewSession() else confirmNewSession = true
     }
@@ -2013,6 +2022,7 @@ private fun SessionRail(
                                 session = session,
                                 selected = selected,
                                 compact = compact,
+                                nowMillis = timestampNowMillis,
                                 onClick = { onSession(session) },
                                 onPin = if (session.pinned != null) {
                                     { onPinSession(displayedBackendId, session) }
@@ -2259,6 +2269,7 @@ internal fun SessionRow(
     session: StoredSession,
     selected: Boolean,
     compact: Boolean,
+    nowMillis: Long,
     onClick: () -> Unit,
     onPin: (() -> Unit)?,
     onArchive: () -> Unit,
@@ -2269,7 +2280,7 @@ internal fun SessionRow(
     val layoutDirection = LocalLayoutDirection.current
     val openOffset = if (layoutDirection == LayoutDirection.Rtl) actionWidthPx else -actionWidthPx
     val summary = sessionSummary(session)
-    val timestamp = formatSessionTimestamp(session.lastActive)
+    val timestamp = formatSessionTimestamp(session.lastActive, nowMillis)
     val active = selected || session.isActive
     val sessionDescription = listOfNotNull(
         session.displayTitle,
@@ -2433,9 +2444,11 @@ internal fun SessionRow(
 }
 
 internal fun sessionSummary(session: StoredSession): String {
+    val metadataLabel = listOf(session.model, session.provider, session.source)
+        .firstNotNullOfOrNull { it?.trim()?.takeIf(String::isNotEmpty) }
     val metadata = listOfNotNull(
         session.profile?.trim()?.takeIf(String::isNotEmpty),
-        (session.model ?: session.provider ?: session.source)?.trim()?.takeIf(String::isNotEmpty),
+        metadataLabel,
     ).distinct()
     val messageCount = session.messageCount.takeIf { it > 0 }?.let { "$it message${if (it == 1) "" else "s"}" }
     return (metadata + listOfNotNull(messageCount)).joinToString(" · ").ifBlank { "Conversation" }
@@ -2443,6 +2456,15 @@ internal fun sessionSummary(session: StoredSession): String {
 
 private fun sessionAvatarLabel(session: StoredSession): String =
     (session.profile ?: session.source)?.firstOrNull(Char::isLetterOrDigit)?.uppercase() ?: "H"
+
+internal fun sessionTimestampRolloverDelayMillis(
+    nowMillis: Long,
+    zoneId: ZoneId = ZoneId.systemDefault(),
+): Long {
+    val now = Instant.ofEpochMilli(nowMillis).atZone(zoneId)
+    val nextDate = now.toLocalDate().plusDays(1).atStartOfDay(zoneId)
+    return ChronoUnit.MILLIS.between(now, nextDate).coerceAtLeast(1L)
+}
 
 internal fun formatSessionTimestamp(
     epochSeconds: Double,

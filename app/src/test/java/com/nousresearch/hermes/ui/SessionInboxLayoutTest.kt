@@ -55,6 +55,8 @@ class SessionInboxLayoutTest {
             ),
         )
         assertEquals("telegram · 1 message", sessionSummary(StoredSession(source = "telegram", messageCount = 1)))
+        assertEquals("openai", sessionSummary(StoredSession(model = " ", provider = "openai", source = "android")))
+        assertEquals("telegram", sessionSummary(StoredSession(model = "", provider = " ", source = "telegram")))
         assertEquals("Conversation", sessionSummary(StoredSession()))
     }
 
@@ -70,6 +72,13 @@ class SessionInboxLayoutTest {
         assertEquals("Jul 2", formatSessionTimestamp(epoch("2026-07-02T09:15:00Z"), now, zone, locale))
         assertEquals("Dec 31, 2025", formatSessionTimestamp(epoch("2025-12-31T09:15:00Z"), now, zone, locale))
         assertEquals("", formatSessionTimestamp(0.0, now, zone, locale))
+    }
+
+    @Test
+    fun timestampClockWaitsUntilTheNextLocalDate() {
+        val now = Instant.parse("2026-08-12T23:59:30Z").toEpochMilli()
+
+        assertEquals(30_000L, sessionTimestampRolloverDelayMillis(now, ZoneId.of("UTC")))
     }
 
     private fun assertConversationRowFits(width: Int, compact: Boolean, click: Boolean) {
@@ -88,6 +97,7 @@ class SessionInboxLayoutTest {
                             ),
                             selected = true,
                             compact = compact,
+                            nowMillis = 0L,
                             onClick = { clicks += 1 },
                             onPin = {},
                             onArchive = {},
