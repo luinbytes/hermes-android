@@ -2017,7 +2017,9 @@ private fun SessionRail(
                             }
                         }
                         items(sessions, key = { "${it.profile}:${it.durableId}" }) { session ->
-                            val selected = state.activeStoredSession?.durableId == session.durableId
+                            val selected = state.activeStoredSession?.let {
+                                it.durableId == session.durableId && it.profile == session.profile
+                            } == true
                             val active = session.isActive || (selected && state.runtimeSessionId != null)
                             val displayedBackendId = state.backend?.id.orEmpty()
                             SessionRow(
