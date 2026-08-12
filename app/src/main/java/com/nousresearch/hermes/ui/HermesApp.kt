@@ -193,6 +193,7 @@ import androidx.compose.ui.input.key.type
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.navigation.NavDestination
 import androidx.navigation.NavDestination.Companion.hasRoute
 import androidx.navigation.compose.NavHost
@@ -1900,6 +1901,10 @@ private fun SessionRail(
     val drawerScope = rememberCoroutineScope()
     val timeFormat = android.text.format.DateFormat.getTimeFormat(LocalContext.current)
     var timestampNowMillis by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LifecycleResumeEffect(Unit) {
+        timestampNowMillis = System.currentTimeMillis()
+        onPauseOrDispose {}
+    }
     LaunchedEffect(Unit) {
         while (true) {
             val currentMillis = System.currentTimeMillis()
