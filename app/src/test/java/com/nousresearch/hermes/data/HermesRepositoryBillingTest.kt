@@ -527,12 +527,14 @@ class HermesRepositoryBillingTest {
             awaitReady(repository, backendA.id)
             val reconnectStarted = CompletableDeferred<Unit>()
             val releaseReconnect = CompletableDeferred<Unit>()
-            gateway.blockNextReconnect(backendA.id, reconnectStarted, releaseReconnect)
+            val reconnectCompleted = CompletableDeferred<Unit>()
+            gateway.blockNextReconnect(backendA.id, reconnectStarted, releaseReconnect, reconnectCompleted)
 
             gateway.failConnection("network dropped")
             withTimeout(5_000L) { reconnectStarted.await() }
             registry.save(backendB)
             releaseReconnect.complete(Unit)
+            withTimeout(5_000L) { reconnectCompleted.await() }
             awaitReady(repository, backendB.id)
 
             assertEquals(backendB.id, gateway.connectedBackendIds.last())
@@ -1612,8 +1614,9 @@ private class RecordingGateway(
         backendId: String,
         started: CompletableDeferred<Unit>,
         release: CompletableDeferred<Unit>,
+        completed: CompletableDeferred<Unit>,
     ) {
-        blockedReconnect = BlockedReconnect(backendId, started, release)
+        blockedReconnect = BlockedReconnect(backendId, started, release, completed)
     }
 
     fun failConnection(reason: String) {
@@ -1643,6 +1646,7 @@ private class RecordingGateway(
         }
         connectedBackendIds += config.id
         mutableConnectionState.value = GatewayConnectionState.Open
+        blocked?.completed?.complete(Unit)
     }
 
     override suspend fun disconnect() {
@@ -1660,6 +1664,7 @@ private data class BlockedReconnect(
     val backendId: String,
     val started: CompletableDeferred<Unit>,
     val release: CompletableDeferred<Unit>,
+    val completed: CompletableDeferred<Unit>,
 )
 
 private data class RecordedGatewayRequest(
