@@ -602,13 +602,15 @@ class HermesRepositoryBillingTest {
             server.dispatcher = object : Dispatcher() {
                 override fun dispatch(request: RecordedRequest): MockResponse = when (request.requestUrl?.encodedPath) {
                     "/api/status" -> MockResponse().setBody("""{"status":"ready","hermes_version":"0.18.2"}""")
-                    "/api/profiles/sessions" -> if (sessionFetches.incrementAndGet() == 1) {
-                        MockResponse().setBody("""{"sessions":[{"session_id":"session-1"}]}""")
-                    } else {
-                        refreshStarted.complete(Unit)
-                        MockResponse()
-                            .setBodyDelay(1, TimeUnit.SECONDS)
-                            .setBody("""{"sessions":[{"session_id":"session-1"}]}""")
+                    "/api/profiles/sessions" -> when (sessionFetches.incrementAndGet()) {
+                        1 -> MockResponse().setBody("""{"sessions":[{"session_id":"session-1"}]}""")
+                        2 -> {
+                            refreshStarted.complete(Unit)
+                            MockResponse()
+                                .setBodyDelay(1, TimeUnit.SECONDS)
+                                .setBody("""{"sessions":[{"session_id":"session-1"}]}""")
+                        }
+                        else -> MockResponse().setBody("""{"sessions":[]}""")
                     }
                     else -> MockResponse().setResponseCode(404)
                 }
@@ -639,6 +641,9 @@ class HermesRepositoryBillingTest {
             withTimeout(5_000L) { refreshStarted.await() }
             repository.deleteSession(session)
             refresh.join()
+            withTimeout(5_000L) {
+                while (sessionFetches.get() < 3) delay(10)
+            }
 
             assertTrue(repository.state.value.sessions.isEmpty())
         }
