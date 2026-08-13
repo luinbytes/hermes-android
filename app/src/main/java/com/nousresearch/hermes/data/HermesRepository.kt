@@ -592,6 +592,11 @@ class HermesRepository @Inject constructor(
         val requestGeneration = sessionListGeneration.get()
         val refreshGeneration = sessionListRefreshPriorityMutex.withLock {
             if (
+                backendCredentialGeneration.get() != requestCredentialGeneration ||
+                mutableState.value.backend?.id != backend.id
+            ) {
+                null
+            } else if (
                 !showLoading &&
                 (visibleSessionListRefreshGeneration.get() != 0L || silentSessionListRefreshGeneration.get() != 0L)
             ) {
@@ -1560,6 +1565,8 @@ class HermesRepository @Inject constructor(
     suspend fun renameActive(title: String) {
         val cleaned = title.trim()
         require(cleaned.isNotEmpty() && cleaned.length <= 200) { "Session titles must be 1–200 characters" }
+        val requestBackendId = mutableState.value.backend?.id
+        val credentialGeneration = backendCredentialGeneration.get()
         val sessionId = mutableState.value.runtimeSessionId ?: return
         runCatching {
             val response = gateway.request(
@@ -1571,6 +1578,7 @@ class HermesRepository @Inject constructor(
             )
             json.decodeFromJsonElement(SessionTitleResult.serializer(), response)
         }.onSuccess { result ->
+            requestBackendId?.let { markSessionListMutation(it, credentialGeneration) }
             val active = mutableState.value.activeStoredSession
             val durableId = result.sessionKey ?: active?.durableId
             mutableState.value = mutableState.value.copy(
