@@ -368,6 +368,7 @@ class HermesRepository @Inject constructor(
     private val sessionListGeneration = AtomicLong()
     private val sessionListRefreshGeneration = AtomicLong()
     private val visibleSessionListRefreshGeneration = AtomicLong()
+    private val silentSessionListRefreshGeneration = AtomicLong()
     private val pendingSilentSessionListRefresh = AtomicBoolean()
     private val sessionListRefreshPriorityMutex = Mutex()
     private val backendCredentialGeneration = AtomicLong()
@@ -587,13 +588,22 @@ class HermesRepository @Inject constructor(
         ) return
         val requestGeneration = sessionListGeneration.get()
         val refreshGeneration = sessionListRefreshPriorityMutex.withLock {
-            if (!showLoading && visibleSessionListRefreshGeneration.get() != 0L) {
+            if (
+                !showLoading &&
+                (visibleSessionListRefreshGeneration.get() != 0L || silentSessionListRefreshGeneration.get() != 0L)
+            ) {
                 pendingSilentSessionListRefresh.set(true)
                 null
             } else {
                 sessionListRefreshGeneration.incrementAndGet().also {
-                    if (showLoading) visibleSessionListRefreshGeneration.set(it)
-                    else pendingSilentSessionListRefresh.set(false)
+                    if (showLoading) {
+                        visibleSessionListRefreshGeneration.set(it)
+                        silentSessionListRefreshGeneration.set(0L)
+                    }
+                    else {
+                        silentSessionListRefreshGeneration.set(it)
+                        pendingSilentSessionListRefresh.set(false)
+                    }
                 }
             }
         } ?: return
@@ -688,6 +698,10 @@ class HermesRepository @Inject constructor(
                         current
                     }
                 }
+                if (pendingSilentSessionListRefresh.getAndSet(false)) {
+                    scope.launch { refreshSessions(showLoading = false) }
+                }
+            } else if (!showLoading && silentSessionListRefreshGeneration.compareAndSet(refreshGeneration, 0L)) {
                 if (pendingSilentSessionListRefresh.getAndSet(false)) {
                     scope.launch { refreshSessions(showLoading = false) }
                 }
@@ -4623,6 +4637,9 @@ class HermesRepository @Inject constructor(
         require(
             mutableState.value.activeStoredSession?.durableId != session.durableId,
         ) { "Close an active session before deleting it" }
+        val requestBackendId = mutableState.value.backend?.id
+        val credentialGeneration = backendCredentialGeneration.get()
+        val cleanupProfile = session.profile.normalizedProfile()
         runCatching {
             val response = gateway.request(
                 "session.delete",
@@ -4632,22 +4649,30 @@ class HermesRepository @Inject constructor(
                 require(it.deleted == session.durableId) { "Hermes deleted a different session than requested" }
             }
         }.onSuccess {
-            val backendId = mutableState.value.backend?.id
-            if (backendId != null) {
-                val profile = session.profile ?: mutableState.value.activeProfile
-                draftStore.remove(DraftContext(backendId, profile, session.durableId))
-                composerQueueStore.remove(ComposerQueueContext(backendId, profile, session.durableId))
+            if (requestBackendId != null) {
+                markSessionListMutation(requestBackendId, credentialGeneration)
+                draftStore.remove(DraftContext(requestBackendId, cleanupProfile, session.durableId))
+                composerQueueStore.remove(ComposerQueueContext(requestBackendId, cleanupProfile, session.durableId))
             }
-            mutableState.value = mutableState.value.copy(
-                sessions = mutableState.value.sessions.filterNot {
-                    it.durableId == session.durableId &&
-                        it.profile.normalizedProfile() == session.profile.normalizedProfile()
-                },
-                error = null,
-            )
+            mutableState.update { current ->
+                if (
+                    current.backend?.id != requestBackendId ||
+                    backendCredentialGeneration.get() != credentialGeneration
+                ) {
+                    current
+                } else {
+                    current.copy(
+                        sessions = current.sessions.filterNot {
+                            it.durableId == session.durableId &&
+                                it.profile.normalizedProfile() == session.profile.normalizedProfile()
+                        },
+                        error = null,
+                    )
+                }
+            }
         }.onFailure { error ->
             if (error is CancellationException) throw error
-            fail(error)
+            requestBackendId?.let { reportCurrentBackendMutationFailure(error, it, credentialGeneration) }
         }
     }
 
@@ -4759,6 +4784,7 @@ class HermesRepository @Inject constructor(
         sessionListMutationMutex.withLock { backendCredentialGeneration.incrementAndGet() }
         sessionListRefreshPriorityMutex.withLock {
             visibleSessionListRefreshGeneration.set(0L)
+            silentSessionListRefreshGeneration.set(0L)
             pendingSilentSessionListRefresh.set(false)
         }
         sessionTargetMutex.withLock { archivedSessionTargets.clear() }

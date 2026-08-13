@@ -595,6 +595,149 @@ class HermesRepositoryBillingTest {
     }
 
     @Test
+    fun `session deletion invalidates an in flight silent refresh`() = runBlocking {
+        MockWebServer().use { server ->
+            val sessionFetches = AtomicInteger()
+            val refreshStarted = CompletableDeferred<Unit>()
+            server.dispatcher = object : Dispatcher() {
+                override fun dispatch(request: RecordedRequest): MockResponse = when (request.requestUrl?.encodedPath) {
+                    "/api/status" -> MockResponse().setBody("""{"status":"ready","hermes_version":"0.18.2"}""")
+                    "/api/profiles/sessions" -> if (sessionFetches.incrementAndGet() == 1) {
+                        MockResponse().setBody("""{"sessions":[{"session_id":"session-1"}]}""")
+                    } else {
+                        refreshStarted.complete(Unit)
+                        MockResponse()
+                            .setBodyDelay(1, TimeUnit.SECONDS)
+                            .setBody("""{"sessions":[{"session_id":"session-1"}]}""")
+                    }
+                    else -> MockResponse().setResponseCode(404)
+                }
+            }
+            server.start()
+            val context = RuntimeEnvironment.getApplication()
+            val backend = backend(server)
+            val registry = BackendRegistry(context, json)
+            val credentials = InMemoryCredentialStore()
+            val gateway = RecordingGateway(json)
+            registry.save(backend)
+            credentials.put(backend.id, SESSION_COOKIE)
+            val repository = repository(
+                context,
+                registry,
+                credentials,
+                BillingPendingChargeStore(context, json),
+                gateway,
+            )
+            awaitReady(repository, backend.id)
+            gateway.enqueue(
+                "session.delete",
+                json.parseToJsonElement("""{"deleted":"session-1"}"""),
+            )
+            val session = repository.state.value.sessions.single()
+
+            val refresh = launch { repository.refreshSessions(showLoading = false) }
+            withTimeout(5_000L) { refreshStarted.await() }
+            repository.deleteSession(session)
+            refresh.join()
+
+            assertTrue(repository.state.value.sessions.isEmpty())
+        }
+    }
+
+    @Test
+    fun `delayed delete failure cannot overwrite a new backend`() = runBlocking {
+        MockWebServer().use { server ->
+            server.dispatcher = readyDashboardDispatcher()
+            server.start()
+            val context = RuntimeEnvironment.getApplication()
+            val backendA = backend(server)
+            val backendB = backendA.copy(id = "work", label = "Work")
+            val registry = BackendRegistry(context, json)
+            val credentials = InMemoryCredentialStore()
+            val gateway = RecordingGateway(json)
+            registry.save(backendA)
+            credentials.put(backendA.id, SESSION_COOKIE)
+            credentials.put(backendB.id, SESSION_COOKIE)
+            val repository = repository(
+                context,
+                registry,
+                credentials,
+                BillingPendingChargeStore(context, json),
+                gateway,
+            )
+            awaitReady(repository, backendA.id)
+            val deleteStarted = CompletableDeferred<Unit>()
+            val releaseDelete = CompletableDeferred<Unit>()
+            gateway.enqueueBlock("session.delete") {
+                deleteStarted.complete(Unit)
+                releaseDelete.await()
+                error("Delete failed")
+            }
+
+            val deleting = launch {
+                repository.deleteSession(StoredSession(sessionId = "session-1", profile = "research"))
+            }
+            withTimeout(5_000L) { deleteStarted.await() }
+            registry.save(backendB)
+            awaitReady(repository, backendB.id)
+            releaseDelete.complete(Unit)
+            deleting.join()
+
+            assertEquals(backendB.id, repository.state.value.backend?.id)
+            assertFalse(repository.state.value.error.orEmpty().contains("Delete failed"))
+        }
+    }
+
+    @Test
+    fun `concurrent silent session refreshes coalesce without losing an older success`() = runBlocking {
+        MockWebServer().use { server ->
+            val sessionFetches = AtomicInteger()
+            val firstRefreshStarted = CompletableDeferred<Unit>()
+            server.dispatcher = object : Dispatcher() {
+                override fun dispatch(request: RecordedRequest): MockResponse = when (request.requestUrl?.encodedPath) {
+                    "/api/status" -> MockResponse().setBody("""{"status":"ready","hermes_version":"0.18.2"}""")
+                    "/api/profiles/sessions" -> when (sessionFetches.incrementAndGet()) {
+                        1 -> MockResponse().setBody("""{"sessions":[]}""")
+                        2 -> {
+                            firstRefreshStarted.complete(Unit)
+                            MockResponse()
+                                .setBodyDelay(1, TimeUnit.SECONDS)
+                                .setBody("""{"sessions":[{"session_id":"session-1","message_count":2}]}""")
+                        }
+                        else -> MockResponse().setResponseCode(500)
+                    }
+                    else -> MockResponse().setResponseCode(404)
+                }
+            }
+            server.start()
+            val context = RuntimeEnvironment.getApplication()
+            val backend = backend(server)
+            val registry = BackendRegistry(context, json)
+            val credentials = InMemoryCredentialStore()
+            registry.save(backend)
+            credentials.put(backend.id, SESSION_COOKIE)
+            val repository = repository(
+                context,
+                registry,
+                credentials,
+                BillingPendingChargeStore(context, json),
+                RecordingGateway(json),
+            )
+            awaitReady(repository, backend.id)
+
+            val first = launch { repository.refreshSessions(showLoading = false) }
+            withTimeout(5_000L) { firstRefreshStarted.await() }
+            repository.refreshSessions(showLoading = false)
+            first.join()
+            withTimeout(5_000L) {
+                while (sessionFetches.get() < 3) delay(10)
+            }
+
+            assertEquals(2, repository.state.value.sessions.single().messageCount)
+        }
+    }
+
+    @Test
     fun `latest session open wins when an earlier resume finishes last`() = runBlocking {
         MockWebServer().use { server ->
             server.dispatcher = object : Dispatcher() {
