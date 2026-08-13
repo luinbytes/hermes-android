@@ -639,7 +639,7 @@ class HermesRepository @Inject constructor(
                             current.copy(
                                 sessions = sessions,
                                 sessionListLoading = if (showLoading) false else current.sessionListLoading,
-                                sessionListError = if (showLoading) null else current.sessionListError,
+                                sessionListError = null,
                             )
                         }
                     }

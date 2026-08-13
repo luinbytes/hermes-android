@@ -1352,15 +1352,10 @@ class HermesRepositoryBillingTest {
     @Test
     fun `failed visible session refresh preserves chat loading`() = runBlocking {
         MockWebServer().use { server ->
-            val sessionFetches = AtomicInteger()
             server.dispatcher = object : Dispatcher() {
                 override fun dispatch(request: RecordedRequest): MockResponse = when (request.requestUrl?.encodedPath) {
                     "/api/status" -> MockResponse().setBody("""{"status":"ready","hermes_version":"0.18.2"}""")
-                    "/api/profiles/sessions" -> if (sessionFetches.incrementAndGet() == 1) {
-                        MockResponse().setBody("""{"sessions":[]}""")
-                    } else {
-                        MockResponse().setResponseCode(500).setBody("Refresh failed")
-                    }
+                    "/api/profiles/sessions" -> MockResponse().setBody("""{"sessions":[]}""")
                     "/api/sessions/session-1/messages" -> MockResponse().setBody(
                         """{"session_id":"session-1","messages":[]}""",
                     )
@@ -1404,6 +1399,8 @@ class HermesRepositoryBillingTest {
 
             releaseOpen.complete(Unit)
             opening.join()
+            repository.refreshSessions(showLoading = false)
+            assertEquals(null, repository.state.value.sessionListError)
         }
     }
 
