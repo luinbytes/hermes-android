@@ -637,7 +637,9 @@ class HermesRepositoryBillingTest {
                 "session.delete",
                 json.parseToJsonElement("""{"deleted":"session-1"}"""),
             )
-            val session = repository.state.value.sessions.single()
+            val session = repository.state.value.sessions.single().copy(profile = "")
+            val draftContext = DraftContext(backend.id, "", session.durableId)
+            DraftStore(context).put(draftContext, "unfinished")
 
             val refresh = launch { repository.refreshSessions(showLoading = false) }
             withTimeout(5_000L) { refreshStarted.await() }
@@ -648,6 +650,7 @@ class HermesRepositoryBillingTest {
             }
 
             assertTrue(repository.state.value.sessions.isEmpty())
+            assertEquals("", DraftStore(context).get(draftContext))
         }
     }
 
@@ -806,6 +809,12 @@ class HermesRepositoryBillingTest {
                 while (sessionFetches.get() < 2) delay(10)
             }
             assertEquals("live-b", repository.state.value.runtimeSessionId)
+            gateway.emit(
+                GatewayEvent("session.info", "live-b", buildJsonObject { put("running", false) }),
+            )
+            withTimeout(5_000L) {
+                while (sessionFetches.get() < 3) delay(10)
+            }
         }
     }
 
@@ -1345,7 +1354,7 @@ class HermesRepositoryBillingTest {
                             1 -> MockResponse().setBody("""{"sessions":[]}""")
                             2 -> {
                                 refreshStarted.complete(Unit)
-                                MockResponse().setBodyDelay(1, TimeUnit.SECONDS).setBody("""{"sessions":[]}""")
+                                MockResponse().setHeadersDelay(1, TimeUnit.SECONDS).setResponseCode(500)
                             }
                             else -> MockResponse().setBody(
                                 """{"sessions":[{"session_id":"session-1","pinned":true}]}""",
@@ -1376,7 +1385,9 @@ class HermesRepositoryBillingTest {
             withTimeout(5_000L) { refreshStarted.await() }
             repository.pinSession(backend.id, StoredSession(sessionId = "session-1", pinned = false))
             visible.join()
-            withTimeout(5_000L) { repository.state.first { it.sessions.singleOrNull()?.pinned == true } }
+            withTimeout(5_000L) {
+                while (sessionFetches.get() < 3) delay(10)
+            }
 
             assertFalse(repository.state.value.sessionListLoading)
         }

@@ -438,6 +438,11 @@ class HermesRepository @Inject constructor(
                 val eventSessionId = event.sessionId?.takeIf(String::isNotBlank)
                 val runtimeId = current.runtimeSessionId
                 val acceptsEvent = shouldAcceptRuntimeEvent(current.restoration.status, runtimeId, event.sessionId)
+                val sessionInfo = if (event.type == "session.info" && event.payload != null) {
+                    runCatching { json.decodeFromJsonElement(SessionRuntimeInfo.serializer(), event.payload) }.getOrNull()
+                } else {
+                    null
+                }
                 if (
                     event.type == "billing.step_up.verification" &&
                     event.payload != null &&
@@ -469,9 +474,7 @@ class HermesRepository @Inject constructor(
                 }
                 if (acceptsEvent) {
                     val runtimeInfo = when {
-                        event.type == "session.info" && event.payload != null -> runCatching {
-                            json.decodeFromJsonElement(SessionRuntimeInfo.serializer(), event.payload)
-                        }.getOrDefault(current.runtimeInfo)
+                        sessionInfo != null -> sessionInfo
                         event.type == "message.start" -> current.runtimeInfo.copy(running = true)
                         event.type == "message.complete" -> current.runtimeInfo.copy(running = false)
                         else -> current.runtimeInfo
@@ -520,7 +523,7 @@ class HermesRepository @Inject constructor(
                         scheduleQueueDrain()
                     }
                 }
-                if (event.type == "message.complete") {
+                if (event.type == "message.complete" || sessionInfo?.running == false) {
                     scope.launch { refreshSessions(showLoading = false) }
                 }
             }
@@ -665,6 +668,7 @@ class HermesRepository @Inject constructor(
                         current
                     } else {
                         currentRequest = sessionListGeneration.get() == requestGeneration
+                        if (!currentRequest) pendingSilentSessionListRefresh.set(true)
                         if (showLoading) current.copy(sessionListLoading = false) else current
                     }
                 }
@@ -4640,7 +4644,7 @@ class HermesRepository @Inject constructor(
         ) { "Close an active session before deleting it" }
         val requestBackendId = mutableState.value.backend?.id
         val credentialGeneration = backendCredentialGeneration.get()
-        val cleanupProfile = session.profile.normalizedProfile()
+        val cleanupProfile = session.profile ?: mutableState.value.activeProfile
         runCatching {
             val response = gateway.request(
                 "session.delete",
