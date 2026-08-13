@@ -60,6 +60,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
@@ -109,6 +110,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -134,6 +136,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -190,6 +193,7 @@ import androidx.compose.ui.input.key.type
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.navigation.NavDestination
 import androidx.navigation.NavDestination.Companion.hasRoute
 import androidx.navigation.compose.NavHost
@@ -206,6 +210,7 @@ import com.nousresearch.hermes.data.PendingAttachment
 import com.nousresearch.hermes.data.AttachmentPhase
 import com.nousresearch.hermes.data.ProfileIdentityDraft
 import com.nousresearch.hermes.data.SlashSuggestion
+import com.nousresearch.hermes.data.normalizedProfile
 import com.nousresearch.hermes.domain.MessageRole
 import com.nousresearch.hermes.domain.ComposerBrowseState
 import com.nousresearch.hermes.domain.ComposerHistory
@@ -251,6 +256,12 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.time.format.FormatStyle
+import java.time.temporal.ChronoUnit
+import java.util.Locale
 import kotlin.math.roundToInt
 
 private const val MAX_VISIBLE_COMPOSER_HISTORY = 20
@@ -1879,133 +1890,224 @@ private fun SessionRail(
     val remoteResults = if (query.isBlank()) emptyList() else state.sessionSearchResults.filterNot { result ->
         visibleSessions.any { it.durableId == result.sessionId && it.profile == result.profile }
     }
+    val sessionSections = if (query.isBlank()) {
+        listOf(
+            "PINNED" to visibleSessions.filter { it.pinned == true },
+            "RECENT" to visibleSessions.filterNot { it.pinned == true },
+        )
+    } else {
+        listOf("" to visibleSessions)
+    }
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val drawerScope = rememberCoroutineScope()
+    val timeFormat = android.text.format.DateFormat.getTimeFormat(LocalContext.current)
+    var timestampNowMillis by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LifecycleResumeEffect(Unit) {
+        timestampNowMillis = System.currentTimeMillis()
+        onPauseOrDispose {}
+    }
+    LaunchedEffect(Unit) {
+        while (true) {
+            val currentMillis = System.currentTimeMillis()
+            delay(sessionTimestampRolloverDelayMillis(currentMillis))
+            timestampNowMillis = System.currentTimeMillis()
+        }
+    }
+    val startNewSession = {
+        if (state.runtimeSessionId == null) onNewSession() else confirmNewSession = true
+    }
     LaunchedEffect(query) { onSearchSessions(query) }
     val railContent: @Composable () -> Unit = {
-        Column(modifier.background(Color.Transparent)) {
-        Row(
-            Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 14.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            if (compact) {
-                IconButton(onClick = { drawerScope.launch { drawerState.open() } }) {
-                    Icon(Icons.Outlined.Menu, "Open navigation")
+        Box(modifier.background(Color.Transparent)) {
+            Column(Modifier.fillMaxSize()) {
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    if (compact) {
+                        IconButton(onClick = { drawerScope.launch { drawerState.open() } }) {
+                            Icon(Icons.Outlined.Menu, "Open navigation")
+                        }
+                    }
+                    if (!compact) {
+                        BrandGlyphSmall()
+                        Spacer(Modifier.width(10.dp))
+                    }
+                    Column(Modifier.weight(1f).clickable(onClick = onBackends)) {
+                        Text(if (compact) "CHATS" else "HERMES", style = MaterialTheme.typography.titleLarge)
+                        Text(state.backend?.label.orEmpty(), style = MaterialTheme.typography.bodySmall, maxLines = 1)
+                    }
+                    IconButton(onClick = onRefresh) { Icon(Icons.Outlined.Refresh, "Refresh conversations") }
+                    if (!compact) {
+                        IconButton(onClick = startNewSession) { Icon(Icons.Outlined.Add, "New conversation") }
+                    }
                 }
-            }
-            BrandGlyphSmall()
-            Spacer(Modifier.width(10.dp))
-            Column(Modifier.weight(1f).clickable(onClick = onBackends)) {
-                Text("HERMES", style = MaterialTheme.typography.titleLarge)
-                Text(state.backend?.label.orEmpty(), style = MaterialTheme.typography.bodySmall, maxLines = 1)
-            }
-            IconButton(onClick = onRefresh) { Icon(Icons.Outlined.Refresh, "Refresh sessions") }
-            IconButton(
-                onClick = {
-                    if (state.runtimeSessionId == null) onNewSession() else confirmNewSession = true
-                },
-            ) { Icon(Icons.Outlined.Add, "New session") }
-        }
-        ConnectionLine(connection)
-        if (!compact) {
-        Row(
-            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            OutlinedButton(
-                onClick = onArtifacts,
-                modifier = Modifier.weight(1f),
-                contentPadding = PaddingValues(horizontal = 12.dp),
-            ) {
-                Icon(Icons.Outlined.Folder, null)
-                Spacer(Modifier.width(6.dp))
-                Text("Artifacts")
-            }
-            OutlinedButton(
-                onClick = onAutomations,
-                modifier = Modifier.weight(1f),
-                contentPadding = PaddingValues(horizontal = 12.dp),
-            ) {
-                Icon(Icons.Outlined.Schedule, null)
-                Spacer(Modifier.width(6.dp))
-                Text("Automations")
-            }
-        }
-        Row(
-            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            OutlinedButton(
-                onClick = onManage,
-                modifier = Modifier.weight(1f),
-                contentPadding = PaddingValues(horizontal = 12.dp),
-            ) {
-                Icon(Icons.Outlined.Tune, null)
-                Spacer(Modifier.width(6.dp))
-                Text("Manage")
-            }
-            OutlinedButton(
-                onClick = onAppSettings,
-                modifier = Modifier.weight(1f),
-                contentPadding = PaddingValues(horizontal = 12.dp),
-            ) {
-                Icon(Icons.Outlined.Info, null)
-                Spacer(Modifier.width(6.dp))
-                Text("App settings")
-            }
-        }
-        }
-        OutlinedTextField(
-            value = query,
-            onValueChange = { query = it.take(200) },
-            placeholder = { Text("Search sessions") },
-            leadingIcon = { Icon(Icons.Outlined.Search, null) },
-            trailingIcon = {
-                if (state.sessionSearchLoading) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
-            },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
-        )
-        state.error?.let { ErrorBanner(it, Modifier.padding(12.dp)) }
-        LazyColumn(contentPadding = PaddingValues(vertical = 8.dp)) {
-            items(visibleSessions, key = { "${it.profile}:${it.durableId}" }) { session ->
-                val selected = state.activeStoredSession?.durableId == session.durableId
-                val displayedBackendId = state.backend?.id.orEmpty()
-                SessionRow(
-                    session = session,
-                    selected = selected,
-                    onClick = { onSession(session) },
-                    onPin = if (session.pinned != null) ({ onPinSession(displayedBackendId, session) }) else null,
-                    onArchive = { onArchiveSession(displayedBackendId, session) },
-                    onDelete = if (!selected) ({ pendingDelete = session }) else null,
+                ConnectionLine(connection)
+                if (state.sessionListLoading) LinearProgressIndicator(Modifier.fillMaxWidth())
+                if (!compact) {
+                    Row(
+                        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        OutlinedButton(
+                            onClick = onArtifacts,
+                            modifier = Modifier.weight(1f),
+                            contentPadding = PaddingValues(horizontal = 12.dp),
+                        ) {
+                            Icon(Icons.Outlined.Folder, null)
+                            Spacer(Modifier.width(6.dp))
+                            Text("Artifacts")
+                        }
+                        OutlinedButton(
+                            onClick = onAutomations,
+                            modifier = Modifier.weight(1f),
+                            contentPadding = PaddingValues(horizontal = 12.dp),
+                        ) {
+                            Icon(Icons.Outlined.Schedule, null)
+                            Spacer(Modifier.width(6.dp))
+                            Text("Automations")
+                        }
+                    }
+                    Row(
+                        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        OutlinedButton(
+                            onClick = onManage,
+                            modifier = Modifier.weight(1f),
+                            contentPadding = PaddingValues(horizontal = 12.dp),
+                        ) {
+                            Icon(Icons.Outlined.Tune, null)
+                            Spacer(Modifier.width(6.dp))
+                            Text("Manage")
+                        }
+                        OutlinedButton(
+                            onClick = onAppSettings,
+                            modifier = Modifier.weight(1f),
+                            contentPadding = PaddingValues(horizontal = 12.dp),
+                        ) {
+                            Icon(Icons.Outlined.Info, null)
+                            Spacer(Modifier.width(6.dp))
+                            Text("App settings")
+                        }
+                    }
+                }
+                OutlinedTextField(
+                    value = query,
+                    onValueChange = { query = it.take(200) },
+                    placeholder = { Text("Search conversations") },
+                    leadingIcon = { Icon(Icons.Outlined.Search, null) },
+                    trailingIcon = {
+                        if (state.sessionSearchLoading) {
+                            CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                        }
+                    },
+                    singleLine = true,
+                    shape = RoundedCornerShape(28.dp),
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
                 )
-            }
-            items(remoteResults, key = { "search:${it.profile}:${it.sessionId}" }) { result ->
-                SearchResultRow(result) {
-                    onSession(
-                        StoredSession(
-                            sessionId = result.sessionId,
-                            profile = result.profile,
-                            source = result.source,
-                            model = result.model,
-                            startedAt = result.sessionStarted,
-                        ),
-                    )
-                }
-            }
-            if (visibleSessions.isEmpty() && remoteResults.isEmpty() && !state.loading && !state.sessionSearchLoading) {
-                item {
-                    Column(Modifier.fillMaxWidth().padding(32.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text(if (state.sessions.isEmpty()) "NO SESSIONS" else "NO MATCHES", style = MaterialTheme.typography.titleMedium)
-                        Text(
-                            if (state.sessions.isEmpty()) "Start a conversation or connect another Hermes surface."
-                            else "Try a title, profile, model, provider or source.",
-                            style = MaterialTheme.typography.bodySmall,
-                        )
+                state.error?.let { ErrorBanner(it, Modifier.padding(12.dp)) }
+                state.sessionListError?.let { ErrorBanner(it, Modifier.padding(horizontal = 12.dp)) }
+                LazyColumn(
+                    contentPadding = PaddingValues(top = 8.dp, bottom = if (compact) 88.dp else 8.dp),
+                ) {
+                    sessionSections.forEach { (section, sessions) ->
+                        if (section.isNotEmpty() && sessions.isNotEmpty()) {
+                            item("section:$section") {
+                                Text(
+                                    section,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier
+                                        .padding(start = 20.dp, top = 12.dp, end = 20.dp, bottom = 6.dp)
+                                        .semantics { heading() },
+                                )
+                            }
+                        }
+                        items(sessions, key = { "${it.profile}:${it.durableId}" }) { session ->
+                            val selected = state.activeStoredSession?.let { activeSession ->
+                                sameSession(activeSession, session)
+                            } == true
+                            val active = session.isActive || (selected && state.runtimeSessionId != null)
+                            val displayedBackendId = state.backend?.id.orEmpty()
+                            SessionRow(
+                                session = session,
+                                selected = selected,
+                                compact = compact,
+                                nowMillis = timestampNowMillis,
+                                active = active,
+                                timeFormat = timeFormat,
+                                onClick = { onSession(session) },
+                                onPin = if (session.pinned != null) {
+                                    { onPinSession(displayedBackendId, session) }
+                                } else {
+                                    null
+                                },
+                                onArchive = { onArchiveSession(displayedBackendId, session) },
+                                onDelete = if (state.activeStoredSession?.durableId != session.durableId) {
+                                    { pendingDelete = session }
+                                } else {
+                                    null
+                                },
+                            )
+                        }
+                    }
+                    if (remoteResults.isNotEmpty()) {
+                        item("section:search-results") {
+                            Text(
+                                "SEARCH RESULTS",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier
+                                    .padding(start = 20.dp, top = 12.dp, end = 20.dp, bottom = 6.dp)
+                                    .semantics { heading() },
+                            )
+                        }
+                    }
+                    items(remoteResults, key = { "search:${it.profile}:${it.sessionId}" }) { result ->
+                        SearchResultRow(result) {
+                            onSession(
+                                StoredSession(
+                                    sessionId = result.sessionId,
+                                    profile = result.profile,
+                                    source = result.source,
+                                    model = result.model,
+                                    startedAt = result.sessionStarted,
+                                ),
+                            )
+                        }
+                    }
+                    if (
+                        visibleSessions.isEmpty() && remoteResults.isEmpty() &&
+                        !state.loading && !state.sessionListLoading && !state.sessionSearchLoading
+                    ) {
+                        item {
+                            Column(
+                                Modifier.fillMaxWidth().padding(32.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                            ) {
+                                Text(
+                                    if (state.sessions.isEmpty()) "NO CONVERSATIONS" else "NO MATCHES",
+                                    style = MaterialTheme.typography.titleMedium,
+                                )
+                                Text(
+                                    if (state.sessions.isEmpty()) "Start a conversation or connect another Hermes surface."
+                                    else "Try a title, profile, model, provider or source.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                )
+                            }
+                        }
                     }
                 }
             }
-        }
+            if (compact) {
+                FloatingActionButton(
+                    onClick = startNewSession,
+                    modifier = Modifier.align(Alignment.BottomEnd).padding(20.dp),
+                ) {
+                    Icon(Icons.Outlined.Edit, "New conversation")
+                }
+            }
         }
     }
 
@@ -2089,31 +2191,47 @@ private fun SessionRail(
 }
 
 @Composable
-private fun SearchResultRow(result: SessionSearchHit, onClick: () -> Unit) {
-    Surface(
-        onClick = onClick,
-        shape = RoundedCornerShape(12.dp),
-        color = MaterialTheme.colorScheme.surfaceVariant,
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 3.dp),
-    ) {
-        Column(Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
-            Text(
-                highlightedSearchSnippet(
-                    result.snippet.ifBlank { "Session ${result.sessionId}" },
-                    MaterialTheme.colorScheme.primary,
-                ),
-                style = MaterialTheme.typography.bodyMedium,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-            )
-            Text(
-                listOf(result.profile, result.source, result.model).filterNotNull().filter(String::isNotBlank).joinToString(" / "),
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.primary,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
+private fun SearchResultRow(
+    result: SessionSearchHit,
+    onClick: () -> Unit,
+) {
+    Column(Modifier.fillMaxWidth()) {
+        Surface(
+            onClick = onClick,
+            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Row(
+                Modifier.padding(horizontal = 16.dp, vertical = 11.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Surface(shape = CircleShape, color = MaterialTheme.colorScheme.primaryContainer, modifier = Modifier.size(48.dp)) {
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Icon(Icons.Outlined.Search, null, tint = MaterialTheme.colorScheme.onPrimaryContainer)
+                    }
+                }
+                Spacer(Modifier.width(12.dp))
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                    Text(
+                        highlightedSearchSnippet(
+                            result.snippet.ifBlank { "Conversation ${result.sessionId}" },
+                            MaterialTheme.colorScheme.primary,
+                        ),
+                        style = MaterialTheme.typography.bodyMedium,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        listOf(result.profile, result.source, result.model).filterNotNull().filter(String::isNotBlank).joinToString(" · "),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
         }
+        HorizontalDivider(Modifier.padding(start = 76.dp))
     }
 }
 
@@ -2167,9 +2285,13 @@ private fun ConnectionLine(connection: GatewayConnectionState) {
 }
 
 @Composable
-private fun SessionRow(
+internal fun SessionRow(
     session: StoredSession,
     selected: Boolean,
+    compact: Boolean,
+    nowMillis: Long,
+    active: Boolean,
+    timeFormat: java.text.DateFormat? = null,
     onClick: () -> Unit,
     onPin: (() -> Unit)?,
     onArchive: () -> Unit,
@@ -2179,10 +2301,15 @@ private fun SessionRow(
     val actionWidthPx = with(LocalDensity.current) { actionWidth.toPx() }
     val layoutDirection = LocalLayoutDirection.current
     val openOffset = if (layoutDirection == LayoutDirection.Rtl) actionWidthPx else -actionWidthPx
+    val summary = sessionSummary(session)
+    val timestamp = formatSessionTimestamp(session.lastActive, nowMillis, timeFormat = timeFormat)
     val sessionDescription = listOfNotNull(
         session.displayTitle,
-        session.profile?.takeIf(String::isNotBlank),
-        session.model?.takeIf(String::isNotBlank),
+        summary,
+        timestamp.takeIf(String::isNotBlank),
+        "Selected".takeIf { selected },
+        "Active".takeIf { active },
+        "Pinned".takeIf { session.pinned == true },
     ).joinToString(", ")
     val anchors = remember(actionWidthPx, openOffset) {
         DraggableAnchors<Boolean> {
@@ -2192,11 +2319,10 @@ private fun SessionRow(
     }
     val swipeState = remember(actionWidthPx, layoutDirection) { AnchoredDraggableState(false, anchors) }
     val actionScope = rememberCoroutineScope()
-    Box(
-        Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp)
-            .clip(RoundedCornerShape(12.dp))
-            .background(MaterialTheme.colorScheme.surfaceVariant),
-    ) {
+    val avatarSize = if (compact) 48.dp else 40.dp
+    val horizontalPadding = if (compact) 16.dp else 12.dp
+    Column(Modifier.fillMaxWidth()) {
+        Box(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceVariant)) {
         Row(
             Modifier.matchParentSize().padding(end = 8.dp),
             horizontalArrangement = Arrangement.End,
@@ -2251,8 +2377,10 @@ private fun SessionRow(
                     orientation = Orientation.Horizontal,
                     reverseDirection = false,
                 )
-                .clip(RoundedCornerShape(12.dp))
-                .background(if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant)
+                .background(
+                    if (selected) MaterialTheme.colorScheme.primaryContainer
+                    else MaterialTheme.colorScheme.surface,
+                )
                 .clickable {
                     if (swipeState.currentValue) {
                         actionScope.launch { swipeState.animateTo(false) }
@@ -2290,21 +2418,102 @@ private fun SessionRow(
                         },
                     )
                 }
-                .padding(horizontal = 20.dp, vertical = 13.dp),
+                .padding(horizontal = horizontalPadding, vertical = if (compact) 11.dp else 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Column(Modifier.weight(1f)) {
-                Text(session.displayTitle, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    session.profile?.let { Text(it.uppercase(), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary) }
-                    session.model?.let { Text(it, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+            Surface(
+                shape = CircleShape,
+                color = if (active) MaterialTheme.colorScheme.tertiaryContainer else MaterialTheme.colorScheme.primaryContainer,
+                modifier = Modifier.size(avatarSize),
+            ) {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Text(
+                        sessionAvatarLabel(session),
+                        style = MaterialTheme.typography.titleMedium,
+                        color = if (active) MaterialTheme.colorScheme.onTertiaryContainer else MaterialTheme.colorScheme.onPrimaryContainer,
+                    )
                 }
             }
-            if (session.pinned == true) {
-                Icon(Icons.Outlined.PushPin, "Pinned ${session.displayTitle}", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                Text(session.displayTitle, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(
+                    summary,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
             }
-            if (session.isActive) Box(Modifier.size(7.dp).clip(RoundedCornerShape(50)).background(MaterialTheme.colorScheme.tertiary))
+            Spacer(Modifier.width(8.dp))
+            Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (timestamp.isNotEmpty()) {
+                    Text(timestamp, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    if (session.pinned == true) {
+                        Icon(Icons.Outlined.PushPin, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(16.dp))
+                    }
+                    if (active) {
+                        Box(Modifier.size(8.dp).clip(CircleShape).background(MaterialTheme.colorScheme.tertiary))
+                    }
+                }
+            }
         }
+        }
+        HorizontalDivider(Modifier.padding(start = horizontalPadding + avatarSize + 12.dp))
+    }
+}
+
+internal fun sameSession(first: StoredSession, second: StoredSession): Boolean =
+    first.durableId == second.durableId &&
+        first.profile.normalizedProfile() == second.profile.normalizedProfile()
+
+internal fun sessionSummary(session: StoredSession): String {
+    val metadataLabel = listOf(session.model, session.provider, session.source)
+        .firstNotNullOfOrNull { it?.trim()?.takeIf(String::isNotEmpty) }
+    val metadata = listOfNotNull(
+        session.profile?.trim()?.takeIf(String::isNotEmpty),
+        metadataLabel,
+    ).distinct()
+    val messageCount = session.messageCount.takeIf { it > 0 }?.let { "$it message${if (it == 1) "" else "s"}" }
+    return (metadata + listOfNotNull(messageCount)).joinToString(" · ").ifBlank { "Conversation" }
+}
+
+private fun sessionAvatarLabel(session: StoredSession): String =
+    (session.profile ?: session.source)?.firstOrNull(Char::isLetterOrDigit)?.uppercase() ?: "H"
+
+internal fun sessionTimestampRolloverDelayMillis(
+    nowMillis: Long,
+    zoneId: ZoneId = ZoneId.systemDefault(),
+): Long {
+    val now = Instant.ofEpochMilli(nowMillis).atZone(zoneId)
+    val nextDate = now.toLocalDate().plusDays(1).atStartOfDay(zoneId)
+    return ChronoUnit.MILLIS.between(now, nextDate).coerceAtLeast(1L)
+}
+
+internal fun formatSessionTimestamp(
+    epochSeconds: Double,
+    nowMillis: Long = System.currentTimeMillis(),
+    zoneId: ZoneId = ZoneId.systemDefault(),
+    locale: Locale = Locale.getDefault(),
+    timeFormat: java.text.DateFormat? = null,
+): String {
+    if (!epochSeconds.isFinite() || epochSeconds <= 0.0) return ""
+    val value = runCatching { Instant.ofEpochMilli((epochSeconds * 1_000).toLong()).atZone(zoneId) }.getOrNull() ?: return ""
+    val now = Instant.ofEpochMilli(nowMillis).atZone(zoneId)
+    val daysAgo = ChronoUnit.DAYS.between(value.toLocalDate(), now.toLocalDate())
+    return when {
+        daysAgo == 0L -> timeFormat?.format(java.util.Date(value.toInstant().toEpochMilli()))
+            ?: value.format(DateTimeFormatter.ofLocalizedTime(FormatStyle.SHORT).withLocale(locale))
+        daysAgo == 1L -> "Yesterday"
+        daysAgo in 2L..6L -> value.format(DateTimeFormatter.ofPattern("EEE", locale))
+        value.year == now.year -> value.format(
+            DateTimeFormatter.ofPattern(android.text.format.DateFormat.getBestDateTimePattern(locale, "MMMd"), locale),
+        )
+        else -> value.format(
+            DateTimeFormatter.ofPattern(android.text.format.DateFormat.getBestDateTimePattern(locale, "yMMMd"), locale),
+        )
     }
 }
 

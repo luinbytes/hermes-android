@@ -85,6 +85,7 @@ import com.nousresearch.hermes.platform.mergeSharedText
 import com.nousresearch.hermes.security.DiagnosticRedactor
 import java.util.UUID
 import java.math.BigDecimal
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
@@ -104,6 +105,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.joinAll
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.Json
@@ -117,6 +119,8 @@ data class HermesState(
     val sessions: List<StoredSession> = emptyList(),
     val sessionSearchResults: List<SessionSearchHit> = emptyList(),
     val sessionSearchLoading: Boolean = false,
+    val sessionListLoading: Boolean = false,
+    val sessionListError: String? = null,
     val sessionSearchQuery: String = "",
     val activeStoredSession: StoredSession? = null,
     val runtimeSessionId: String? = null,
@@ -362,7 +366,12 @@ class HermesRepository @Inject constructor(
     private val sessionSearchLock = Any()
     private val sessionSearchGeneration = AtomicLong()
     private val sessionListGeneration = AtomicLong()
+    private val sessionListPreflightGeneration = AtomicLong()
     private val sessionListRefreshGeneration = AtomicLong()
+    private val visibleSessionListRefreshGeneration = AtomicLong()
+    private val silentSessionListRefreshGeneration = AtomicLong()
+    private val pendingSilentSessionListRefresh = AtomicBoolean()
+    private val sessionListRefreshPriorityMutex = Mutex()
     private val backendCredentialGeneration = AtomicLong()
     private val sessionListMutationMutex = Mutex()
     private var slashCompletionJob: Job? = null
@@ -430,6 +439,11 @@ class HermesRepository @Inject constructor(
                 val eventSessionId = event.sessionId?.takeIf(String::isNotBlank)
                 val runtimeId = current.runtimeSessionId
                 val acceptsEvent = shouldAcceptRuntimeEvent(current.restoration.status, runtimeId, event.sessionId)
+                val sessionInfo = if (event.type == "session.info" && event.payload != null) {
+                    runCatching { json.decodeFromJsonElement(SessionRuntimeInfo.serializer(), event.payload) }.getOrNull()
+                } else {
+                    null
+                }
                 if (
                     event.type == "billing.step_up.verification" &&
                     event.payload != null &&
@@ -461,9 +475,7 @@ class HermesRepository @Inject constructor(
                 }
                 if (acceptsEvent) {
                     val runtimeInfo = when {
-                        event.type == "session.info" && event.payload != null -> runCatching {
-                            json.decodeFromJsonElement(SessionRuntimeInfo.serializer(), event.payload)
-                        }.getOrDefault(current.runtimeInfo)
+                        sessionInfo != null -> sessionInfo
                         event.type == "message.start" -> current.runtimeInfo.copy(running = true)
                         event.type == "message.complete" -> current.runtimeInfo.copy(running = false)
                         else -> current.runtimeInfo
@@ -512,6 +524,9 @@ class HermesRepository @Inject constructor(
                         scheduleQueueDrain()
                     }
                 }
+                if (event.type == "message.complete" || sessionInfo?.running == false) {
+                    scope.launch { refreshSessions(showLoading = false) }
+                }
             }
         }
         scope.launch {
@@ -556,44 +571,91 @@ class HermesRepository @Inject constructor(
     suspend fun discoverDashboardPasswordProviders(config: BackendConfig): List<DashboardAuthProvider> =
         dashboardConnector.discoverPasswordProviders(config)
 
-    suspend fun refreshSessions() {
+    suspend fun refreshSessions(showLoading: Boolean = true) {
+        val preflightGeneration = if (showLoading) {
+            sessionListPreflightGeneration.incrementAndGet()
+        } else {
+            sessionListPreflightGeneration.get()
+        }
         val requestCredentialGeneration = backendCredentialGeneration.get()
-        val (backend, token) = activeCredentials(allowRecovery = true)
+        val requestBackendId = mutableState.value.backend?.id
+        val credentials = runCatching { activeCredentials(allowRecovery = true) }.getOrElse { error ->
+            if (error is CancellationException) throw error
+            if (
+                backendCredentialGeneration.get() == requestCredentialGeneration &&
+                sessionListPreflightGeneration.get() == preflightGeneration &&
+                mutableState.value.backend?.id == requestBackendId &&
+                (showLoading || error.isSessionAuthenticationFailure())
+            ) {
+                failSessionListRefresh(error)
+            }
+            return
+        }
+        val (backend, token) = credentials
         if (
             backendCredentialGeneration.get() != requestCredentialGeneration ||
             mutableState.value.backend?.id != backend.id
         ) return
         val requestGeneration = sessionListGeneration.get()
-        val refreshGeneration = sessionListRefreshGeneration.incrementAndGet()
-        val requestOpenSessionGeneration = openSessionGeneration.get()
+        val refreshGeneration = sessionListRefreshPriorityMutex.withLock {
+            if (
+                backendCredentialGeneration.get() != requestCredentialGeneration ||
+                mutableState.value.backend?.id != backend.id
+            ) {
+                null
+            } else if (
+                !showLoading &&
+                (visibleSessionListRefreshGeneration.get() != 0L || silentSessionListRefreshGeneration.get() != 0L)
+            ) {
+                pendingSilentSessionListRefresh.set(true)
+                null
+            } else {
+                sessionListRefreshGeneration.incrementAndGet().also {
+                    if (showLoading) {
+                        visibleSessionListRefreshGeneration.set(it)
+                        silentSessionListRefreshGeneration.set(0L)
+                    }
+                    else {
+                        silentSessionListRefreshGeneration.set(it)
+                        pendingSilentSessionListRefresh.set(false)
+                    }
+                }
+            }
+        } ?: return
         val credentialGeneration = requestCredentialGeneration
         mutableState.update { current ->
             if (
+                showLoading &&
                 current.backend?.id == backend.id &&
                 backendCredentialGeneration.get() == credentialGeneration
             ) {
-                current.copy(loading = true)
+                current.copy(sessionListLoading = true, sessionListError = null)
             } else {
                 current
             }
         }
-        runCatching { restClient.sessions(backend, token).sessions }
-            .onSuccess { sessions ->
+        try {
+            runCatching { restClient.sessions(backend, token).sessions }
+                .onSuccess { sessions ->
                 sessionTargetMutex.withLock {
                     var published = false
                     mutableState.update { current ->
                         published = false
                         val ownsLoading = current.backend?.id == backend.id &&
                             sessionListRefreshGeneration.get() == refreshGeneration &&
-                            openSessionGeneration.get() == requestOpenSessionGeneration &&
                             backendCredentialGeneration.get() == credentialGeneration
                         if (!ownsLoading) {
                             current
                         } else if (sessionListGeneration.get() != requestGeneration) {
-                            current.copy(loading = false)
+                            pendingSilentSessionListRefresh.set(true)
+                            if (showLoading) current.copy(sessionListLoading = false) else current
                         } else {
                             published = true
-                            current.copy(sessions = sessions, loading = false, error = null)
+                            current.copy(
+                                sessions = sessions,
+                                sessionListLoading = if (showLoading) false else current.sessionListLoading,
+                                sessionListError = null,
+                            )
                         }
                     }
                     if (published) {
@@ -606,30 +668,62 @@ class HermesRepository @Inject constructor(
                 }
             }
             .onFailure { error ->
+                if (error is CancellationException || !currentCoroutineContext().isActive) {
+                    throw CancellationException("Session refresh cancelled").also { it.initCause(error) }
+                }
                 var currentRequest = false
                 mutableState.update { current ->
                     val ownsLoading = current.backend?.id == backend.id &&
                         sessionListRefreshGeneration.get() == refreshGeneration &&
-                        openSessionGeneration.get() == requestOpenSessionGeneration &&
                         backendCredentialGeneration.get() == credentialGeneration
                     if (!ownsLoading) {
                         current
                     } else {
                         currentRequest = sessionListGeneration.get() == requestGeneration
-                        current.copy(loading = false)
+                        if (!currentRequest) pendingSilentSessionListRefresh.set(true)
+                        if (showLoading) current.copy(sessionListLoading = false) else current
                     }
                 }
                 if (
+                    error.isSessionAuthenticationFailure() &&
+                    mutableState.value.backend?.id == backend.id &&
+                    sessionListRefreshGeneration.get() == refreshGeneration &&
+                    backendCredentialGeneration.get() == credentialGeneration
+                ) {
+                    failSessionListRefresh(error)
+                } else if (
                     currentRequest &&
                     mutableState.value.backend?.id == backend.id &&
                     sessionListRefreshGeneration.get() == refreshGeneration &&
-                    openSessionGeneration.get() == requestOpenSessionGeneration &&
                     backendCredentialGeneration.get() == credentialGeneration &&
                     sessionListGeneration.get() == requestGeneration
                 ) {
-                    fail(error)
+                    if (showLoading) failSessionListRefresh(error)
                 }
             }
+        } finally {
+            if (showLoading && visibleSessionListRefreshGeneration.compareAndSet(refreshGeneration, 0L)) {
+                mutableState.update { current ->
+                    if (
+                        current.backend?.id == backend.id &&
+                        current.sessionListLoading &&
+                        backendCredentialGeneration.get() == credentialGeneration &&
+                        sessionListRefreshGeneration.get() == refreshGeneration
+                    ) {
+                        current.copy(sessionListLoading = false)
+                    } else {
+                        current
+                    }
+                }
+                if (pendingSilentSessionListRefresh.getAndSet(false)) {
+                    scope.launch { refreshSessions(showLoading = false) }
+                }
+            } else if (!showLoading && silentSessionListRefreshGeneration.compareAndSet(refreshGeneration, 0L)) {
+                if (pendingSilentSessionListRefresh.getAndSet(false)) {
+                    scope.launch { refreshSessions(showLoading = false) }
+                }
+            }
+        }
     }
 
     fun searchSessions(query: String) {
@@ -1478,6 +1572,8 @@ class HermesRepository @Inject constructor(
     suspend fun renameActive(title: String) {
         val cleaned = title.trim()
         require(cleaned.isNotEmpty() && cleaned.length <= 200) { "Session titles must be 1–200 characters" }
+        val requestBackendId = mutableState.value.backend?.id
+        val credentialGeneration = backendCredentialGeneration.get()
         val sessionId = mutableState.value.runtimeSessionId ?: return
         runCatching {
             val response = gateway.request(
@@ -1489,6 +1585,7 @@ class HermesRepository @Inject constructor(
             )
             json.decodeFromJsonElement(SessionTitleResult.serializer(), response)
         }.onSuccess { result ->
+            requestBackendId?.let { markSessionListMutation(it, credentialGeneration) }
             val active = mutableState.value.activeStoredSession
             val durableId = result.sessionKey ?: active?.durableId
             mutableState.value = mutableState.value.copy(
@@ -4560,6 +4657,9 @@ class HermesRepository @Inject constructor(
         require(
             mutableState.value.activeStoredSession?.durableId != session.durableId,
         ) { "Close an active session before deleting it" }
+        val requestBackendId = mutableState.value.backend?.id
+        val credentialGeneration = backendCredentialGeneration.get()
+        val cleanupProfile = session.profile ?: mutableState.value.activeProfile
         runCatching {
             val response = gateway.request(
                 "session.delete",
@@ -4569,22 +4669,30 @@ class HermesRepository @Inject constructor(
                 require(it.deleted == session.durableId) { "Hermes deleted a different session than requested" }
             }
         }.onSuccess {
-            val backendId = mutableState.value.backend?.id
-            if (backendId != null) {
-                val profile = session.profile ?: mutableState.value.activeProfile
-                draftStore.remove(DraftContext(backendId, profile, session.durableId))
-                composerQueueStore.remove(ComposerQueueContext(backendId, profile, session.durableId))
+            if (requestBackendId != null) {
+                markSessionListMutation(requestBackendId, credentialGeneration)
+                draftStore.remove(DraftContext(requestBackendId, cleanupProfile, session.durableId))
+                composerQueueStore.remove(ComposerQueueContext(requestBackendId, cleanupProfile, session.durableId))
             }
-            mutableState.value = mutableState.value.copy(
-                sessions = mutableState.value.sessions.filterNot {
-                    it.durableId == session.durableId &&
-                        it.profile.normalizedProfile() == session.profile.normalizedProfile()
-                },
-                error = null,
-            )
+            mutableState.update { current ->
+                if (
+                    current.backend?.id != requestBackendId ||
+                    backendCredentialGeneration.get() != credentialGeneration
+                ) {
+                    current
+                } else {
+                    current.copy(
+                        sessions = current.sessions.filterNot {
+                            it.durableId == session.durableId &&
+                                it.profile.normalizedProfile() == session.profile.normalizedProfile()
+                        },
+                        error = null,
+                    )
+                }
+            }
         }.onFailure { error ->
             if (error is CancellationException) throw error
-            fail(error)
+            requestBackendId?.let { reportCurrentBackendMutationFailure(error, it, credentialGeneration) }
         }
     }
 
@@ -4694,6 +4802,11 @@ class HermesRepository @Inject constructor(
 
     private suspend fun connect(backend: BackendConfig) {
         sessionListMutationMutex.withLock { backendCredentialGeneration.incrementAndGet() }
+        sessionListRefreshPriorityMutex.withLock {
+            visibleSessionListRefreshGeneration.set(0L)
+            silentSessionListRefreshGeneration.set(0L)
+            pendingSilentSessionListRefresh.set(false)
+        }
         sessionTargetMutex.withLock { archivedSessionTargets.clear() }
         invalidatePendingAttachments()
         providerOAuthPollJob?.cancelAndJoin()
@@ -5194,6 +5307,23 @@ class HermesRepository @Inject constructor(
         mutableState.value = mutableState.value.copy(loading = value)
     }
 
+    private fun failSessionListRefresh(error: Throwable) {
+        if (error.isSessionAuthenticationFailure()) {
+            fail(error)
+        } else {
+            mutableState.update {
+                it.copy(
+                    sessionListLoading = false,
+                    sessionListError = error.message ?: "Could not refresh conversations",
+                )
+            }
+        }
+    }
+
+    private fun Throwable.isSessionAuthenticationFailure(): Boolean =
+        this is ReconnectRequiredException ||
+            (this is com.nousresearch.hermes.network.HermesHttpException && statusCode in setOf(401, 403))
+
     private fun fail(error: Throwable) {
         val reconnect = error is ReconnectRequiredException || (error is com.nousresearch.hermes.network.HermesHttpException && error.statusCode in setOf(401, 403))
         val reconnectBackendId = mutableState.value.backend?.id
@@ -5205,6 +5335,8 @@ class HermesRepository @Inject constructor(
             gatewayBackendId = null
             mutableState.value = mutableState.value.copy(
                 loading = false,
+                sessionListLoading = false,
+                sessionListError = null,
                 sending = false,
                 activeStoredSession = null,
                 runtimeSessionId = null,
@@ -5231,6 +5363,8 @@ class HermesRepository @Inject constructor(
                         backend = null,
                         status = null,
                         sessions = emptyList(),
+                        sessionListLoading = false,
+                        sessionListError = null,
                         reconnectRequiredBackendId = reconnectBackendId,
                     )
                 }

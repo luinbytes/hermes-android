@@ -148,4 +148,70 @@ a physical foldable or tablet.
 
 - P3: add the site's subtle paper/noise treatment only if Nous provides a reusable licensed raster texture appropriate for Android; do not recreate it with custom SVG or procedural art.
 
+## Messaging-style session inbox — 2026-08-12
+
+Source visual truth: `docs/design/native-shell-directions/a-session-atlas-drawer.png`.
+
+Implementation evidence: `docs/design/evidence/session-inbox-api36.png`.
+
+Viewport: Android 16 / API 36 `medium_phone`, 412×892dp rendered at 420dpi to
+1080×2342 pixels. The source phone content was cropped from its device frame and
+scaled to the implementation height for a side-by-side full-view comparison.
+The implementation screenshot contains app-owned content only; system status
+and navigation icons are intentionally absent from the Compose capture.
+
+State: dark Nous skin, connected personal backend, one active pinned
+conversation, three recent conversations, and the compact navigation drawer
+closed. The source shows the same Chats atlas with the drawer open, so the
+comparison evaluates the main inbox hierarchy rather than drawer width.
+
+### Findings
+
+No actionable P0, P1, or P2 mismatch remains.
+
+- Fonts and typography: Cormorant Garamond keeps the source's editorial `CHATS`
+  hierarchy while Courier Prime carries connection state, conversation titles,
+  metadata, and timestamps without clipping.
+- Spacing and layout rhythm: the phone screen uses a native app bar, rounded
+  search field, labelled pinned/recent groups, flat 72dp conversation rows, and
+  an unobstructed bottom-end compose action. The 48dp avatars and touch targets
+  retain readable density at 412dp.
+- Colors and visual tokens: the implementation uses the existing Nous cobalt,
+  cream, primary-container, and live-state tokens. Selected and active state is
+  visible without relying on color alone in accessibility semantics.
+- Image quality and asset fidelity: no new raster or approximate brand assets
+  were introduced. The existing first-party Nous field treatment remains the
+  screen background; standard Material icons provide navigation and actions.
+- Copy and content: `Chats`, `Search conversations`, `Pinned`, `Recent`, and the
+  new-conversation action use familiar messaging language. Rows show only
+  title, profile/model/source, message count, last-active time, active state,
+  and pin state already returned by Hermes; they do not invent unread status or
+  latest-message excerpts.
+
+Focused comparison: the full-resolution paired view kept all row typography,
+timestamps, indicators, and dividers readable, so a separate focused crop was
+not necessary. The Compose regression check also rendered a selected pinned
+row at 360dp and 130% font scale, verified its bounds, semantics, and click.
+
+### Comparison history
+
+#### Iteration 1
+
+Earlier finding: P1, idle pin/archive/delete actions showed faintly through the
+conversation rows because the row foreground used partial opacity.
+
+Fix: restored the non-selected row foreground to the opaque Material surface.
+
+Post-fix evidence: `docs/design/evidence/session-inbox-api36.png`; the action
+icons are hidden until the existing swipe gesture reveals them, and the row
+metadata and timestamps remain clear.
+
+### Accepted adaptations
+
+- The native compose FAB replaces the concept's large new-conversation card to
+  match familiar Android messaging behavior and preserve more inbox space.
+- Hermes does not return a latest-message preview or unread state in the stored
+  session payload. Existing metadata is shown instead of loading every
+  transcript or fabricating state.
+
 final result: passed
