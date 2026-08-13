@@ -2041,7 +2041,11 @@ private fun SessionRail(
                                     null
                                 },
                                 onArchive = { onArchiveSession(displayedBackendId, session) },
-                                onDelete = if (!selected) ({ pendingDelete = session }) else null,
+                                onDelete = if (state.activeStoredSession?.durableId != session.durableId) {
+                                    { pendingDelete = session }
+                                } else {
+                                    null
+                                },
                             )
                         }
                     }

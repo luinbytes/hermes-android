@@ -508,6 +508,9 @@ class HermesRepository @Inject constructor(
                             persistActiveSessionTargetIfCurrent(sessionTarget(backendId, activeStoredSession))
                         }
                     }
+                    if (event.type == "message.complete") {
+                        scope.launch { refreshSessions() }
+                    }
                     if (event.type == "message.complete" || (event.type == "session.info" && !runtimeInfo.running)) {
                         scheduleQueueDrain()
                     }

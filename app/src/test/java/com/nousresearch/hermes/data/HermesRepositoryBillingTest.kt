@@ -764,12 +764,19 @@ class HermesRepositoryBillingTest {
     }
 
     @Test
-    fun `completion received during history refresh survives the older resume snapshot`() = runBlocking {
+    fun `completion received during history refresh survives the older resume snapshot and refreshes metadata`() = runBlocking {
         MockWebServer().use { server ->
+            val sessionFetches = AtomicInteger()
             server.dispatcher = object : Dispatcher() {
                 override fun dispatch(request: RecordedRequest): MockResponse = when (request.requestUrl?.encodedPath) {
                     "/api/status" -> MockResponse().setBody("""{"status":"ready","hermes_version":"0.18.2"}""")
-                    "/api/profiles/sessions" -> MockResponse().setBody("""{"sessions":[]}""")
+                    "/api/profiles/sessions" -> MockResponse().setBody(
+                        if (sessionFetches.incrementAndGet() == 1) {
+                            """{"sessions":[]}"""
+                        } else {
+                            """{"sessions":[{"session_id":"session-1","message_count":2,"last_active":1786579200}]}"""
+                        },
+                    )
                     "/api/sessions/session-1/messages" -> MockResponse()
                         .setBodyDelay(1, TimeUnit.SECONDS)
                         .setBody(
@@ -815,7 +822,7 @@ class HermesRepositoryBillingTest {
                 repository.state.first { state ->
                     !state.runtimeInfo.running && state.timeline.items.any {
                         it is TimelineItem.Message && it.text == "Complete answer" && !it.streaming
-                    }
+                    } && state.sessions.singleOrNull()?.messageCount == 2
                 }
             }
             opening.join()
