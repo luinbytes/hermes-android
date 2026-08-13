@@ -366,6 +366,7 @@ class HermesRepository @Inject constructor(
     private val sessionSearchLock = Any()
     private val sessionSearchGeneration = AtomicLong()
     private val sessionListGeneration = AtomicLong()
+    private val sessionListPreflightGeneration = AtomicLong()
     private val sessionListRefreshGeneration = AtomicLong()
     private val visibleSessionListRefreshGeneration = AtomicLong()
     private val silentSessionListRefreshGeneration = AtomicLong()
@@ -571,12 +572,14 @@ class HermesRepository @Inject constructor(
         dashboardConnector.discoverPasswordProviders(config)
 
     suspend fun refreshSessions(showLoading: Boolean = true) {
+        val preflightGeneration = sessionListPreflightGeneration.incrementAndGet()
         val requestCredentialGeneration = backendCredentialGeneration.get()
         val requestBackendId = mutableState.value.backend?.id
         val credentials = runCatching { activeCredentials(allowRecovery = true) }.getOrElse { error ->
             if (error is CancellationException) throw error
             if (
                 backendCredentialGeneration.get() == requestCredentialGeneration &&
+                sessionListPreflightGeneration.get() == preflightGeneration &&
                 mutableState.value.backend?.id == requestBackendId &&
                 (showLoading || error.isSessionAuthenticationFailure())
             ) {
