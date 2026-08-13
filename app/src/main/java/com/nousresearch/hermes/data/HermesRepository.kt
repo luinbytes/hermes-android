@@ -572,7 +572,11 @@ class HermesRepository @Inject constructor(
         dashboardConnector.discoverPasswordProviders(config)
 
     suspend fun refreshSessions(showLoading: Boolean = true) {
-        val preflightGeneration = sessionListPreflightGeneration.incrementAndGet()
+        val preflightGeneration = if (showLoading) {
+            sessionListPreflightGeneration.incrementAndGet()
+        } else {
+            sessionListPreflightGeneration.get()
+        }
         val requestCredentialGeneration = backendCredentialGeneration.get()
         val requestBackendId = mutableState.value.backend?.id
         val credentials = runCatching { activeCredentials(allowRecovery = true) }.getOrElse { error ->
