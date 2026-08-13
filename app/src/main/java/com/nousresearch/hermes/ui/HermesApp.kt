@@ -2307,6 +2307,7 @@ internal fun SessionRow(
         session.displayTitle,
         summary,
         timestamp.takeIf(String::isNotBlank),
+        "Selected".takeIf { selected },
         "Active".takeIf { active },
         "Pinned".takeIf { session.pinned == true },
     ).joinToString(", ")

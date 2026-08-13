@@ -143,6 +143,10 @@ class SessionInboxLayoutTest {
         row.assertExists()
         compose.onNode(
             hasContentDescription("Release planning", substring = true) and
+                hasContentDescription("Selected", substring = true),
+        ).assertExists()
+        compose.onNode(
+            hasContentDescription("Release planning", substring = true) and
                 hasContentDescription("Active", substring = true),
         ).run { if (active) assertExists() else assertDoesNotExist() }
         if (click) row.performClick()
