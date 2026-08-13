@@ -1943,6 +1943,7 @@ private fun SessionRail(
                     }
                 }
                 ConnectionLine(connection)
+                if (state.sessionListLoading) LinearProgressIndicator(Modifier.fillMaxWidth())
                 if (!compact) {
                     Row(
                         Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
@@ -2006,6 +2007,7 @@ private fun SessionRail(
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
                 )
                 state.error?.let { ErrorBanner(it, Modifier.padding(12.dp)) }
+                state.sessionListError?.let { ErrorBanner(it, Modifier.padding(horizontal = 12.dp)) }
                 LazyColumn(
                     contentPadding = PaddingValues(top = 8.dp, bottom = if (compact) 88.dp else 8.dp),
                 ) {
@@ -2075,7 +2077,10 @@ private fun SessionRail(
                             )
                         }
                     }
-                    if (visibleSessions.isEmpty() && remoteResults.isEmpty() && !state.loading && !state.sessionSearchLoading) {
+                    if (
+                        visibleSessions.isEmpty() && remoteResults.isEmpty() &&
+                        !state.loading && !state.sessionListLoading && !state.sessionSearchLoading
+                    ) {
                         item {
                             Column(
                                 Modifier.fillMaxWidth().padding(32.dp),

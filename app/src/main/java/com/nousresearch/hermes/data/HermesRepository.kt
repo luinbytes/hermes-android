@@ -85,6 +85,7 @@ import com.nousresearch.hermes.platform.mergeSharedText
 import com.nousresearch.hermes.security.DiagnosticRedactor
 import java.util.UUID
 import java.math.BigDecimal
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
@@ -104,6 +105,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.joinAll
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.Json
@@ -117,6 +119,8 @@ data class HermesState(
     val sessions: List<StoredSession> = emptyList(),
     val sessionSearchResults: List<SessionSearchHit> = emptyList(),
     val sessionSearchLoading: Boolean = false,
+    val sessionListLoading: Boolean = false,
+    val sessionListError: String? = null,
     val sessionSearchQuery: String = "",
     val activeStoredSession: StoredSession? = null,
     val runtimeSessionId: String? = null,
@@ -363,7 +367,9 @@ class HermesRepository @Inject constructor(
     private val sessionSearchGeneration = AtomicLong()
     private val sessionListGeneration = AtomicLong()
     private val sessionListRefreshGeneration = AtomicLong()
-    private val sessionListRefreshMutex = Mutex()
+    private val visibleSessionListRefreshGeneration = AtomicLong()
+    private val pendingSilentSessionListRefresh = AtomicBoolean()
+    private val sessionListRefreshPriorityMutex = Mutex()
     private val backendCredentialGeneration = AtomicLong()
     private val sessionListMutationMutex = Mutex()
     private var slashCompletionJob: Job? = null
@@ -560,15 +566,30 @@ class HermesRepository @Inject constructor(
     suspend fun discoverDashboardPasswordProviders(config: BackendConfig): List<DashboardAuthProvider> =
         dashboardConnector.discoverPasswordProviders(config)
 
-    suspend fun refreshSessions(showLoading: Boolean = true) = sessionListRefreshMutex.withLock {
+    suspend fun refreshSessions(showLoading: Boolean = true) {
         val requestCredentialGeneration = backendCredentialGeneration.get()
-        val (backend, token) = activeCredentials(allowRecovery = true)
+        val credentials = runCatching { activeCredentials(allowRecovery = true) }.getOrElse { error ->
+            if (error is CancellationException) throw error
+            if (showLoading) failSessionListRefresh(error)
+            return
+        }
+        val (backend, token) = credentials
         if (
             backendCredentialGeneration.get() != requestCredentialGeneration ||
             mutableState.value.backend?.id != backend.id
         ) return
         val requestGeneration = sessionListGeneration.get()
-        val refreshGeneration = sessionListRefreshGeneration.incrementAndGet()
+        val refreshGeneration = sessionListRefreshPriorityMutex.withLock {
+            if (!showLoading && visibleSessionListRefreshGeneration.get() != 0L) {
+                pendingSilentSessionListRefresh.set(true)
+                null
+            } else {
+                sessionListRefreshGeneration.incrementAndGet().also {
+                    if (showLoading) visibleSessionListRefreshGeneration.set(it)
+                    else pendingSilentSessionListRefresh.set(false)
+                }
+            }
+        } ?: return
         val requestOpenSessionGeneration = openSessionGeneration.get()
         val credentialGeneration = requestCredentialGeneration
         mutableState.update { current ->
@@ -577,13 +598,14 @@ class HermesRepository @Inject constructor(
                 current.backend?.id == backend.id &&
                 backendCredentialGeneration.get() == credentialGeneration
             ) {
-                current.copy(loading = true)
+                current.copy(sessionListLoading = true, sessionListError = null)
             } else {
                 current
             }
         }
-        runCatching { restClient.sessions(backend, token).sessions }
-            .onSuccess { sessions ->
+        try {
+            runCatching { restClient.sessions(backend, token).sessions }
+                .onSuccess { sessions ->
                 sessionTargetMutex.withLock {
                     var published = false
                     mutableState.update { current ->
@@ -595,13 +617,13 @@ class HermesRepository @Inject constructor(
                         if (!ownsLoading) {
                             current
                         } else if (sessionListGeneration.get() != requestGeneration) {
-                            if (showLoading) current.copy(loading = false) else current
+                            if (showLoading) current.copy(sessionListLoading = false) else current
                         } else {
                             published = true
                             current.copy(
                                 sessions = sessions,
-                                loading = if (showLoading) false else current.loading,
-                                error = if (showLoading) null else current.error,
+                                sessionListLoading = if (showLoading) false else current.sessionListLoading,
+                                sessionListError = if (showLoading) null else current.sessionListError,
                             )
                         }
                     }
@@ -615,6 +637,9 @@ class HermesRepository @Inject constructor(
                 }
             }
             .onFailure { error ->
+                if (error is CancellationException || !currentCoroutineContext().isActive) {
+                    throw CancellationException("Session refresh cancelled").also { it.initCause(error) }
+                }
                 var currentRequest = false
                 mutableState.update { current ->
                     val ownsLoading = current.backend?.id == backend.id &&
@@ -625,7 +650,7 @@ class HermesRepository @Inject constructor(
                         current
                     } else {
                         currentRequest = sessionListGeneration.get() == requestGeneration
-                        if (showLoading) current.copy(loading = false) else current
+                        if (showLoading) current.copy(sessionListLoading = false) else current
                     }
                 }
                 if (
@@ -636,10 +661,28 @@ class HermesRepository @Inject constructor(
                     backendCredentialGeneration.get() == credentialGeneration &&
                     sessionListGeneration.get() == requestGeneration
                 ) {
-                    if (showLoading) fail(error)
+                    if (showLoading) failSessionListRefresh(error)
                 }
             }
-        Unit
+        } finally {
+            if (showLoading && visibleSessionListRefreshGeneration.compareAndSet(refreshGeneration, 0L)) {
+                mutableState.update { current ->
+                    if (
+                        current.backend?.id == backend.id &&
+                        current.sessionListLoading &&
+                        backendCredentialGeneration.get() == credentialGeneration &&
+                        sessionListRefreshGeneration.get() == refreshGeneration
+                    ) {
+                        current.copy(sessionListLoading = false)
+                    } else {
+                        current
+                    }
+                }
+                if (pendingSilentSessionListRefresh.getAndSet(false)) {
+                    scope.launch { refreshSessions(showLoading = false) }
+                }
+            }
+        }
     }
 
     fun searchSessions(query: String) {
@@ -5204,6 +5247,22 @@ class HermesRepository @Inject constructor(
         mutableState.value = mutableState.value.copy(loading = value)
     }
 
+    private fun failSessionListRefresh(error: Throwable) {
+        if (
+            error is ReconnectRequiredException ||
+            (error is com.nousresearch.hermes.network.HermesHttpException && error.statusCode in setOf(401, 403))
+        ) {
+            fail(error)
+        } else {
+            mutableState.update {
+                it.copy(
+                    sessionListLoading = false,
+                    sessionListError = error.message ?: "Could not refresh conversations",
+                )
+            }
+        }
+    }
+
     private fun fail(error: Throwable) {
         val reconnect = error is ReconnectRequiredException || (error is com.nousresearch.hermes.network.HermesHttpException && error.statusCode in setOf(401, 403))
         val reconnectBackendId = mutableState.value.backend?.id
@@ -5215,6 +5274,8 @@ class HermesRepository @Inject constructor(
             gatewayBackendId = null
             mutableState.value = mutableState.value.copy(
                 loading = false,
+                sessionListLoading = false,
+                sessionListError = null,
                 sending = false,
                 activeStoredSession = null,
                 runtimeSessionId = null,
@@ -5241,6 +5302,8 @@ class HermesRepository @Inject constructor(
                         backend = null,
                         status = null,
                         sessions = emptyList(),
+                        sessionListLoading = false,
+                        sessionListError = null,
                         reconnectRequiredBackendId = reconnectBackendId,
                     )
                 }

@@ -18,6 +18,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -35,6 +36,7 @@ import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import okhttp3.mockwebserver.RecordedRequest
+import okhttp3.mockwebserver.SocketPolicy
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -863,6 +865,114 @@ class HermesRepositoryBillingTest {
                                 .setBodyDelay(1, TimeUnit.SECONDS)
                                 .setBody("""{"sessions":[{"session_id":"session-1","message_count":1}]}""")
                         }
+                        else -> MockResponse()
+                            .setBodyDelay(1, TimeUnit.SECONDS)
+                            .setBody("""{"sessions":[{"session_id":"session-1","message_count":2}]}""")
+                    }
+                    else -> MockResponse().setResponseCode(404)
+                }
+            }
+            server.start()
+            val context = RuntimeEnvironment.getApplication()
+            val backend = backend(server)
+            val registry = BackendRegistry(context, json)
+            val credentials = InMemoryCredentialStore()
+            registry.save(backend)
+            credentials.put(backend.id, SESSION_COOKIE)
+            val repository = repository(
+                context,
+                registry,
+                credentials,
+                BillingPendingChargeStore(context, json),
+                RecordingGateway(json),
+            )
+            awaitReady(repository, backend.id)
+
+            val visible = launch { repository.refreshSessions() }
+            withTimeout(5_000L) { visibleRefreshStarted.await() }
+            assertTrue(repository.state.value.sessionListLoading)
+            assertFalse(repository.state.value.loading)
+            val silent = launch { repository.refreshSessions(showLoading = false) }
+            visible.join()
+            silent.join()
+            withTimeout(5_000L) {
+                repository.state.first { it.sessions.singleOrNull()?.messageCount == 2 }
+            }
+
+            assertFalse(repository.state.value.sessionListLoading)
+            assertEquals(2, repository.state.value.sessions.single().messageCount)
+        }
+    }
+
+    @Test
+    fun `visible session refresh supersedes an in flight silent refresh`() = runBlocking {
+        MockWebServer().use { server ->
+            val sessionFetches = AtomicInteger()
+            val silentRefreshStarted = CompletableDeferred<Unit>()
+            server.dispatcher = object : Dispatcher() {
+                override fun dispatch(request: RecordedRequest): MockResponse = when (request.requestUrl?.encodedPath) {
+                    "/api/status" -> MockResponse().setBody("""{"status":"ready","hermes_version":"0.18.2"}""")
+                    "/api/profiles/sessions" -> when (sessionFetches.incrementAndGet()) {
+                        1 -> MockResponse().setBody("""{"sessions":[]}""")
+                        2 -> {
+                            silentRefreshStarted.complete(Unit)
+                            MockResponse()
+                                .setBodyDelay(1, TimeUnit.SECONDS)
+                                .setBody("""{"sessions":[{"session_id":"session-1","message_count":1}]}""")
+                        }
+                        else -> MockResponse()
+                            .setBodyDelay(1, TimeUnit.SECONDS)
+                            .setBody("""{"sessions":[{"session_id":"session-1","message_count":2}]}""")
+                    }
+                    else -> MockResponse().setResponseCode(404)
+                }
+            }
+            server.start()
+            val context = RuntimeEnvironment.getApplication()
+            val backend = backend(server)
+            val registry = BackendRegistry(context, json)
+            val credentials = InMemoryCredentialStore()
+            registry.save(backend)
+            credentials.put(backend.id, SESSION_COOKIE)
+            val repository = repository(
+                context,
+                registry,
+                credentials,
+                BillingPendingChargeStore(context, json),
+                RecordingGateway(json),
+            )
+            awaitReady(repository, backend.id)
+
+            val silent = launch { repository.refreshSessions(showLoading = false) }
+            withTimeout(5_000L) { silentRefreshStarted.await() }
+            val visible = launch { repository.refreshSessions() }
+            withTimeout(5_000L) {
+                while (sessionFetches.get() < 3) delay(10)
+            }
+            assertTrue(repository.state.value.sessionListLoading)
+            assertFalse(repository.state.value.loading)
+            visible.join()
+            silent.join()
+
+            assertFalse(repository.state.value.sessionListLoading)
+            assertEquals(2, repository.state.value.sessions.single().messageCount)
+        }
+    }
+
+    @Test
+    fun `cancelled visible session refresh releases silent refreshes`() = runBlocking {
+        MockWebServer().use { server ->
+            val sessionFetches = AtomicInteger()
+            val visibleRefreshStarted = CompletableDeferred<Unit>()
+            server.dispatcher = object : Dispatcher() {
+                override fun dispatch(request: RecordedRequest): MockResponse = when (request.requestUrl?.encodedPath) {
+                    "/api/status" -> MockResponse().setBody("""{"status":"ready","hermes_version":"0.18.2"}""")
+                    "/api/profiles/sessions" -> when (sessionFetches.incrementAndGet()) {
+                        1 -> MockResponse().setBody("""{"sessions":[]}""")
+                        2 -> {
+                            visibleRefreshStarted.complete(Unit)
+                            MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE)
+                        }
                         else -> MockResponse().setBody(
                             """{"sessions":[{"session_id":"session-1","message_count":2}]}""",
                         )
@@ -888,13 +998,301 @@ class HermesRepositoryBillingTest {
 
             val visible = launch { repository.refreshSessions() }
             withTimeout(5_000L) { visibleRefreshStarted.await() }
-            assertTrue(repository.state.value.loading)
-            val silent = launch { repository.refreshSessions(showLoading = false) }
-            visible.join()
-            silent.join()
-
+            assertTrue(repository.state.value.sessionListLoading)
             assertFalse(repository.state.value.loading)
+            visible.cancelAndJoin()
+            assertFalse(repository.state.value.sessionListLoading)
+            assertEquals(null, repository.state.value.error)
+
+            repository.refreshSessions(showLoading = false)
+
             assertEquals(2, repository.state.value.sessions.single().messageCount)
+        }
+    }
+
+    @Test
+    fun `cancelled visible refresh does not clear a newer session open spinner`() = runBlocking {
+        MockWebServer().use { server ->
+            val sessionFetches = AtomicInteger()
+            val visibleRefreshStarted = CompletableDeferred<Unit>()
+            server.dispatcher = object : Dispatcher() {
+                override fun dispatch(request: RecordedRequest): MockResponse = when (request.requestUrl?.encodedPath) {
+                    "/api/status" -> MockResponse().setBody("""{"status":"ready","hermes_version":"0.18.2"}""")
+                    "/api/profiles/sessions" -> when (sessionFetches.incrementAndGet()) {
+                        1 -> MockResponse().setBody("""{"sessions":[]}""")
+                        else -> {
+                            visibleRefreshStarted.complete(Unit)
+                            MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE)
+                        }
+                    }
+                    "/api/sessions/session-1/messages" -> MockResponse().setBody(
+                        """{"session_id":"session-1","messages":[]}""",
+                    )
+                    else -> MockResponse().setResponseCode(404)
+                }
+            }
+            server.start()
+            val context = RuntimeEnvironment.getApplication()
+            val backend = backend(server)
+            val registry = BackendRegistry(context, json)
+            val credentials = InMemoryCredentialStore()
+            val gateway = RecordingGateway(json)
+            registry.save(backend)
+            credentials.put(backend.id, SESSION_COOKIE)
+            val repository = repository(
+                context,
+                registry,
+                credentials,
+                BillingPendingChargeStore(context, json),
+                gateway,
+            )
+            awaitReady(repository, backend.id)
+            val openStarted = CompletableDeferred<Unit>()
+            val releaseOpen = CompletableDeferred<Unit>()
+            gateway.enqueueBlock("session.resume") {
+                openStarted.complete(Unit)
+                releaseOpen.await()
+                json.parseToJsonElement(
+                    """{"session_id":"live-1","session_key":"session-1","messages":[]}""",
+                )
+            }
+            gateway.enqueue("model.options", json.parseToJsonElement("""{"providers":[]}"""))
+
+            val visible = launch { repository.refreshSessions() }
+            withTimeout(5_000L) { visibleRefreshStarted.await() }
+            val opening = launch { repository.openSession(StoredSession(sessionId = "session-1")) }
+            withTimeout(5_000L) { openStarted.await() }
+            visible.cancelAndJoin()
+
+            assertTrue(repository.state.value.loading)
+            assertFalse(repository.state.value.sessionListLoading)
+            assertEquals(null, repository.state.value.error)
+
+            releaseOpen.complete(Unit)
+            opening.join()
+        }
+    }
+
+    @Test
+    fun `cancelled visible refresh clears loading after a session list mutation`() = runBlocking {
+        MockWebServer().use { server ->
+            val sessionFetches = AtomicInteger()
+            val visibleRefreshStarted = CompletableDeferred<Unit>()
+            server.dispatcher = object : Dispatcher() {
+                override fun dispatch(request: RecordedRequest): MockResponse = when {
+                    request.requestUrl?.encodedPath == "/api/status" ->
+                        MockResponse().setBody("""{"status":"ready","hermes_version":"0.18.2"}""")
+                    request.requestUrl?.encodedPath == "/api/profiles/sessions" ->
+                        if (sessionFetches.incrementAndGet() == 1) {
+                            MockResponse().setBody("""{"sessions":[]}""")
+                        } else {
+                            visibleRefreshStarted.complete(Unit)
+                            MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE)
+                        }
+                    request.requestUrl?.encodedPath == "/api/sessions/session-1" && request.method == "PATCH" ->
+                        MockResponse().setBody("{}")
+                    else -> MockResponse().setResponseCode(404)
+                }
+            }
+            server.start()
+            val context = RuntimeEnvironment.getApplication()
+            val backend = backend(server)
+            val registry = BackendRegistry(context, json)
+            val credentials = InMemoryCredentialStore()
+            registry.save(backend)
+            credentials.put(backend.id, SESSION_COOKIE)
+            val repository = repository(
+                context,
+                registry,
+                credentials,
+                BillingPendingChargeStore(context, json),
+                RecordingGateway(json),
+            )
+            awaitReady(repository, backend.id)
+
+            val visible = launch { repository.refreshSessions() }
+            withTimeout(5_000L) { visibleRefreshStarted.await() }
+            repository.pinSession(backend.id, StoredSession(sessionId = "session-1", pinned = false))
+            visible.cancelAndJoin()
+
+            assertFalse(repository.state.value.sessionListLoading)
+            assertEquals(null, repository.state.value.error)
+        }
+    }
+
+    @Test
+    fun `silent session refresh ignores missing active credentials`() = runBlocking {
+        MockWebServer().use { server ->
+            server.dispatcher = readyDashboardDispatcher()
+            server.start()
+            val context = RuntimeEnvironment.getApplication()
+            val backend = backend(server)
+            val registry = BackendRegistry(context, json)
+            val credentials = InMemoryCredentialStore()
+            registry.save(backend)
+            credentials.put(backend.id, SESSION_COOKIE)
+            val repository = repository(
+                context,
+                registry,
+                credentials,
+                BillingPendingChargeStore(context, json),
+                RecordingGateway(json),
+            )
+            awaitReady(repository, backend.id)
+            credentials.remove(backend.id)
+
+            repository.refreshSessions(showLoading = false)
+
+            assertEquals(null, repository.state.value.error)
+            assertFalse(repository.state.value.loading)
+            assertFalse(repository.state.value.sessionListLoading)
+        }
+    }
+
+    @Test
+    fun `failed visible session refresh preserves chat loading`() = runBlocking {
+        MockWebServer().use { server ->
+            val sessionFetches = AtomicInteger()
+            server.dispatcher = object : Dispatcher() {
+                override fun dispatch(request: RecordedRequest): MockResponse = when (request.requestUrl?.encodedPath) {
+                    "/api/status" -> MockResponse().setBody("""{"status":"ready","hermes_version":"0.18.2"}""")
+                    "/api/profiles/sessions" -> if (sessionFetches.incrementAndGet() == 1) {
+                        MockResponse().setBody("""{"sessions":[]}""")
+                    } else {
+                        MockResponse().setResponseCode(500).setBody("Refresh failed")
+                    }
+                    "/api/sessions/session-1/messages" -> MockResponse().setBody(
+                        """{"session_id":"session-1","messages":[]}""",
+                    )
+                    else -> MockResponse().setResponseCode(404)
+                }
+            }
+            server.start()
+            val context = RuntimeEnvironment.getApplication()
+            val backend = backend(server)
+            val registry = BackendRegistry(context, json)
+            val credentials = InMemoryCredentialStore()
+            val gateway = RecordingGateway(json)
+            registry.save(backend)
+            credentials.put(backend.id, SESSION_COOKIE)
+            val repository = repository(
+                context,
+                registry,
+                credentials,
+                BillingPendingChargeStore(context, json),
+                gateway,
+            )
+            awaitReady(repository, backend.id)
+            val openStarted = CompletableDeferred<Unit>()
+            val releaseOpen = CompletableDeferred<Unit>()
+            gateway.enqueueBlock("session.resume") {
+                openStarted.complete(Unit)
+                releaseOpen.await()
+                json.parseToJsonElement(
+                    """{"session_id":"live-1","session_key":"session-1","messages":[]}""",
+                )
+            }
+            gateway.enqueue("model.options", json.parseToJsonElement("""{"providers":[]}"""))
+
+            val opening = launch { repository.openSession(StoredSession(sessionId = "session-1")) }
+            withTimeout(5_000L) { openStarted.await() }
+            repository.refreshSessions()
+
+            assertTrue(repository.state.value.loading)
+            assertFalse(repository.state.value.sessionListLoading)
+            assertTrue(repository.state.value.sessionListError.orEmpty().isNotBlank())
+
+            releaseOpen.complete(Unit)
+            opening.join()
+        }
+    }
+
+    @Test
+    fun `authentication failure clears visible session refresh state`() = runBlocking {
+        MockWebServer().use { server ->
+            val sessionFetches = AtomicInteger()
+            server.dispatcher = object : Dispatcher() {
+                override fun dispatch(request: RecordedRequest): MockResponse = when (request.requestUrl?.encodedPath) {
+                    "/api/status" -> MockResponse().setBody("""{"status":"ready","hermes_version":"0.18.2"}""")
+                    "/api/profiles/sessions" -> if (sessionFetches.incrementAndGet() == 1) {
+                        MockResponse().setBody("""{"sessions":[]}""")
+                    } else {
+                        MockResponse().setResponseCode(401)
+                    }
+                    else -> MockResponse().setResponseCode(404)
+                }
+            }
+            server.start()
+            val context = RuntimeEnvironment.getApplication()
+            val backend = backend(server)
+            val registry = BackendRegistry(context, json)
+            val credentials = InMemoryCredentialStore()
+            registry.save(backend)
+            credentials.put(backend.id, SESSION_COOKIE)
+            val repository = repository(
+                context,
+                registry,
+                credentials,
+                BillingPendingChargeStore(context, json),
+                RecordingGateway(json),
+            )
+            awaitReady(repository, backend.id)
+
+            repository.refreshSessions()
+            withTimeout(5_000L) { repository.state.first { it.backend == null } }
+
+            assertFalse(repository.state.value.sessionListLoading)
+        }
+    }
+
+    @Test
+    fun `chat failure does not change an in flight session refresh`() = runBlocking {
+        MockWebServer().use { server ->
+            val sessionFetches = AtomicInteger()
+            val visibleRefreshStarted = CompletableDeferred<Unit>()
+            server.dispatcher = object : Dispatcher() {
+                override fun dispatch(request: RecordedRequest): MockResponse = when (request.requestUrl?.encodedPath) {
+                    "/api/status" -> MockResponse().setBody("""{"status":"ready","hermes_version":"0.18.2"}""")
+                    "/api/profiles/sessions" -> if (sessionFetches.incrementAndGet() == 1) {
+                        MockResponse().setBody("""{"sessions":[]}""")
+                    } else {
+                        visibleRefreshStarted.complete(Unit)
+                        MockResponse()
+                            .setBodyDelay(1, TimeUnit.SECONDS)
+                            .setBody("""{"sessions":[{"session_id":"session-1","message_count":2}]}""")
+                    }
+                    else -> MockResponse().setResponseCode(404)
+                }
+            }
+            server.start()
+            val context = RuntimeEnvironment.getApplication()
+            val backend = backend(server)
+            val registry = BackendRegistry(context, json)
+            val credentials = InMemoryCredentialStore()
+            val gateway = RecordingGateway(json)
+            registry.save(backend)
+            credentials.put(backend.id, SESSION_COOKIE)
+            val repository = repository(
+                context,
+                registry,
+                credentials,
+                BillingPendingChargeStore(context, json),
+                gateway,
+            )
+            awaitReady(repository, backend.id)
+            gateway.enqueueFailure("session.resume", IllegalStateException("Chat failed"))
+
+            val refresh = launch { repository.refreshSessions() }
+            withTimeout(5_000L) { visibleRefreshStarted.await() }
+            repository.openSession(StoredSession(sessionId = "session-1"))
+
+            assertTrue(repository.state.value.sessionListLoading)
+            assertEquals("Chat failed", repository.state.value.error)
+
+            refresh.join()
+
+            assertFalse(repository.state.value.sessionListLoading)
+            assertEquals("Chat failed", repository.state.value.error)
         }
     }
 
