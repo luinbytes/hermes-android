@@ -747,10 +747,12 @@ class HermesRepositoryBillingTest {
     @Test
     fun `latest session open wins when an earlier resume finishes last`() = runBlocking {
         MockWebServer().use { server ->
+            val sessionFetches = AtomicInteger()
             server.dispatcher = object : Dispatcher() {
                 override fun dispatch(request: RecordedRequest): MockResponse = when (request.requestUrl?.encodedPath) {
                     "/api/status" -> MockResponse().setBody("""{"status":"ready","hermes_version":"0.18.2"}""")
-                    "/api/profiles/sessions" -> MockResponse().setBody("""{"sessions":[]}""")
+                    "/api/profiles/sessions" -> MockResponse().also { sessionFetches.incrementAndGet() }
+                        .setBody("""{"sessions":[]}""")
                     "/api/sessions/session-a/messages" -> MockResponse().setBody(
                         """{"session_id":"session-a","messages":[{"role":"user","text":"A"}]}""",
                     )
@@ -798,6 +800,12 @@ class HermesRepositoryBillingTest {
             assertEquals("session-b", repository.state.value.activeStoredSession?.durableId)
             assertEquals("live-b", repository.state.value.runtimeSessionId)
             assertEquals("session-b", registry.sessionTarget(backend.id)?.sessionId)
+
+            gateway.emit(GatewayEvent("message.complete", "live-a", buildJsonObject { put("text", "A done") }))
+            withTimeout(5_000L) {
+                while (sessionFetches.get() < 2) delay(10)
+            }
+            assertEquals("live-b", repository.state.value.runtimeSessionId)
         }
     }
 

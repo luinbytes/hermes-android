@@ -516,12 +516,12 @@ class HermesRepository @Inject constructor(
                             persistActiveSessionTargetIfCurrent(sessionTarget(backendId, activeStoredSession))
                         }
                     }
-                    if (event.type == "message.complete") {
-                        scope.launch { refreshSessions(showLoading = false) }
-                    }
                     if (event.type == "message.complete" || (event.type == "session.info" && !runtimeInfo.running)) {
                         scheduleQueueDrain()
                     }
+                }
+                if (event.type == "message.complete") {
+                    scope.launch { refreshSessions(showLoading = false) }
                 }
             }
         }
