@@ -363,6 +363,7 @@ class HermesRepository @Inject constructor(
     private val sessionSearchGeneration = AtomicLong()
     private val sessionListGeneration = AtomicLong()
     private val sessionListRefreshGeneration = AtomicLong()
+    private val sessionListRefreshMutex = Mutex()
     private val backendCredentialGeneration = AtomicLong()
     private val sessionListMutationMutex = Mutex()
     private var slashCompletionJob: Job? = null
@@ -509,7 +510,7 @@ class HermesRepository @Inject constructor(
                         }
                     }
                     if (event.type == "message.complete") {
-                        scope.launch { refreshSessions() }
+                        scope.launch { refreshSessions(showLoading = false) }
                     }
                     if (event.type == "message.complete" || (event.type == "session.info" && !runtimeInfo.running)) {
                         scheduleQueueDrain()
@@ -559,7 +560,7 @@ class HermesRepository @Inject constructor(
     suspend fun discoverDashboardPasswordProviders(config: BackendConfig): List<DashboardAuthProvider> =
         dashboardConnector.discoverPasswordProviders(config)
 
-    suspend fun refreshSessions() {
+    suspend fun refreshSessions(showLoading: Boolean = true) = sessionListRefreshMutex.withLock {
         val requestCredentialGeneration = backendCredentialGeneration.get()
         val (backend, token) = activeCredentials(allowRecovery = true)
         if (
@@ -572,6 +573,7 @@ class HermesRepository @Inject constructor(
         val credentialGeneration = requestCredentialGeneration
         mutableState.update { current ->
             if (
+                showLoading &&
                 current.backend?.id == backend.id &&
                 backendCredentialGeneration.get() == credentialGeneration
             ) {
@@ -593,10 +595,14 @@ class HermesRepository @Inject constructor(
                         if (!ownsLoading) {
                             current
                         } else if (sessionListGeneration.get() != requestGeneration) {
-                            current.copy(loading = false)
+                            if (showLoading) current.copy(loading = false) else current
                         } else {
                             published = true
-                            current.copy(sessions = sessions, loading = false, error = null)
+                            current.copy(
+                                sessions = sessions,
+                                loading = if (showLoading) false else current.loading,
+                                error = if (showLoading) null else current.error,
+                            )
                         }
                     }
                     if (published) {
@@ -619,7 +625,7 @@ class HermesRepository @Inject constructor(
                         current
                     } else {
                         currentRequest = sessionListGeneration.get() == requestGeneration
-                        current.copy(loading = false)
+                        if (showLoading) current.copy(loading = false) else current
                     }
                 }
                 if (
@@ -630,9 +636,10 @@ class HermesRepository @Inject constructor(
                     backendCredentialGeneration.get() == credentialGeneration &&
                     sessionListGeneration.get() == requestGeneration
                 ) {
-                    fail(error)
+                    if (showLoading) fail(error)
                 }
             }
+        Unit
     }
 
     fun searchSessions(query: String) {

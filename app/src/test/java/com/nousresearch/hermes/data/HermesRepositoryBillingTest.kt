@@ -767,16 +767,20 @@ class HermesRepositoryBillingTest {
     fun `completion received during history refresh survives the older resume snapshot and refreshes metadata`() = runBlocking {
         MockWebServer().use { server ->
             val sessionFetches = AtomicInteger()
+            val metadataRefreshStarted = CompletableDeferred<Unit>()
             server.dispatcher = object : Dispatcher() {
                 override fun dispatch(request: RecordedRequest): MockResponse = when (request.requestUrl?.encodedPath) {
                     "/api/status" -> MockResponse().setBody("""{"status":"ready","hermes_version":"0.18.2"}""")
-                    "/api/profiles/sessions" -> MockResponse().setBody(
-                        if (sessionFetches.incrementAndGet() == 1) {
-                            """{"sessions":[]}"""
-                        } else {
-                            """{"sessions":[{"session_id":"session-1","message_count":2,"last_active":1786579200}]}"""
-                        },
-                    )
+                    "/api/profiles/sessions" -> if (sessionFetches.incrementAndGet() == 1) {
+                        MockResponse().setBody("""{"sessions":[]}""")
+                    } else {
+                        metadataRefreshStarted.complete(Unit)
+                        MockResponse()
+                            .setBodyDelay(1, TimeUnit.SECONDS)
+                            .setBody(
+                                """{"sessions":[{"session_id":"session-1","message_count":2,"last_active":1786579200}]}""",
+                            )
+                    }
                     "/api/sessions/session-1/messages" -> MockResponse()
                         .setBodyDelay(1, TimeUnit.SECONDS)
                         .setBody(
@@ -822,6 +826,15 @@ class HermesRepositoryBillingTest {
                 repository.state.first { state ->
                     !state.runtimeInfo.running && state.timeline.items.any {
                         it is TimelineItem.Message && it.text == "Complete answer" && !it.streaming
+                    }
+                }
+            }
+            withTimeout(5_000L) { metadataRefreshStarted.await() }
+            assertFalse(repository.state.value.loading)
+            withTimeout(5_000L) {
+                repository.state.first { state ->
+                    !state.runtimeInfo.running && state.timeline.items.any {
+                        it is TimelineItem.Message && it.text == "Complete answer" && !it.streaming
                     } && state.sessions.singleOrNull()?.messageCount == 2
                 }
             }
@@ -831,6 +844,57 @@ class HermesRepositoryBillingTest {
             assertEquals("Complete answer", assistant.text)
             assertFalse(assistant.streaming)
             assertFalse(repository.state.value.runtimeInfo.running)
+        }
+    }
+
+    @Test
+    fun `silent session refresh cannot strand a visible refresh spinner`() = runBlocking {
+        MockWebServer().use { server ->
+            val sessionFetches = AtomicInteger()
+            val visibleRefreshStarted = CompletableDeferred<Unit>()
+            server.dispatcher = object : Dispatcher() {
+                override fun dispatch(request: RecordedRequest): MockResponse = when (request.requestUrl?.encodedPath) {
+                    "/api/status" -> MockResponse().setBody("""{"status":"ready","hermes_version":"0.18.2"}""")
+                    "/api/profiles/sessions" -> when (sessionFetches.incrementAndGet()) {
+                        1 -> MockResponse().setBody("""{"sessions":[]}""")
+                        2 -> {
+                            visibleRefreshStarted.complete(Unit)
+                            MockResponse()
+                                .setBodyDelay(1, TimeUnit.SECONDS)
+                                .setBody("""{"sessions":[{"session_id":"session-1","message_count":1}]}""")
+                        }
+                        else -> MockResponse().setBody(
+                            """{"sessions":[{"session_id":"session-1","message_count":2}]}""",
+                        )
+                    }
+                    else -> MockResponse().setResponseCode(404)
+                }
+            }
+            server.start()
+            val context = RuntimeEnvironment.getApplication()
+            val backend = backend(server)
+            val registry = BackendRegistry(context, json)
+            val credentials = InMemoryCredentialStore()
+            registry.save(backend)
+            credentials.put(backend.id, SESSION_COOKIE)
+            val repository = repository(
+                context,
+                registry,
+                credentials,
+                BillingPendingChargeStore(context, json),
+                RecordingGateway(json),
+            )
+            awaitReady(repository, backend.id)
+
+            val visible = launch { repository.refreshSessions() }
+            withTimeout(5_000L) { visibleRefreshStarted.await() }
+            assertTrue(repository.state.value.loading)
+            val silent = launch { repository.refreshSessions(showLoading = false) }
+            visible.join()
+            silent.join()
+
+            assertFalse(repository.state.value.loading)
+            assertEquals(2, repository.state.value.sessions.single().messageCount)
         }
     }
 
