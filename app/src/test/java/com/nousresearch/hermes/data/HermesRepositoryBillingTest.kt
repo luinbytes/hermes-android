@@ -1324,6 +1324,57 @@ class HermesRepositoryBillingTest {
     }
 
     @Test
+    fun `visible refresh invalidated by a session mutation retries`() = runBlocking {
+        MockWebServer().use { server ->
+            val sessionFetches = AtomicInteger()
+            val refreshStarted = CompletableDeferred<Unit>()
+            server.dispatcher = object : Dispatcher() {
+                override fun dispatch(request: RecordedRequest): MockResponse = when {
+                    request.requestUrl?.encodedPath == "/api/status" ->
+                        MockResponse().setBody("""{"status":"ready","hermes_version":"0.18.2"}""")
+                    request.requestUrl?.encodedPath == "/api/profiles/sessions" ->
+                        when (sessionFetches.incrementAndGet()) {
+                            1 -> MockResponse().setBody("""{"sessions":[]}""")
+                            2 -> {
+                                refreshStarted.complete(Unit)
+                                MockResponse().setBodyDelay(1, TimeUnit.SECONDS).setBody("""{"sessions":[]}""")
+                            }
+                            else -> MockResponse().setBody(
+                                """{"sessions":[{"session_id":"session-1","pinned":true}]}""",
+                            )
+                        }
+                    request.requestUrl?.encodedPath == "/api/sessions/session-1" && request.method == "PATCH" ->
+                        MockResponse().setBody("{}")
+                    else -> MockResponse().setResponseCode(404)
+                }
+            }
+            server.start()
+            val context = RuntimeEnvironment.getApplication()
+            val backend = backend(server)
+            val registry = BackendRegistry(context, json)
+            val credentials = InMemoryCredentialStore()
+            registry.save(backend)
+            credentials.put(backend.id, SESSION_COOKIE)
+            val repository = repository(
+                context,
+                registry,
+                credentials,
+                BillingPendingChargeStore(context, json),
+                RecordingGateway(json),
+            )
+            awaitReady(repository, backend.id)
+
+            val visible = launch { repository.refreshSessions() }
+            withTimeout(5_000L) { refreshStarted.await() }
+            repository.pinSession(backend.id, StoredSession(sessionId = "session-1", pinned = false))
+            visible.join()
+            withTimeout(5_000L) { repository.state.first { it.sessions.singleOrNull()?.pinned == true } }
+
+            assertFalse(repository.state.value.sessionListLoading)
+        }
+    }
+
+    @Test
     fun `silent session refresh handles missing active credentials`() = runBlocking {
         MockWebServer().use { server ->
             server.dispatcher = readyDashboardDispatcher()

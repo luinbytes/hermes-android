@@ -632,7 +632,7 @@ class HermesRepository @Inject constructor(
                         if (!ownsLoading) {
                             current
                         } else if (sessionListGeneration.get() != requestGeneration) {
-                            if (!showLoading) pendingSilentSessionListRefresh.set(true)
+                            pendingSilentSessionListRefresh.set(true)
                             if (showLoading) current.copy(sessionListLoading = false) else current
                         } else {
                             published = true
