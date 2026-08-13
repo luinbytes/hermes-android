@@ -542,6 +542,59 @@ class HermesRepositoryBillingTest {
     }
 
     @Test
+    fun `backend switch releases silent session refreshes`() = runBlocking {
+        MockWebServer().use { server ->
+            val sessionFetches = AtomicInteger()
+            val visibleRefreshStarted = CompletableDeferred<Unit>()
+            server.dispatcher = object : Dispatcher() {
+                override fun dispatch(request: RecordedRequest): MockResponse = when (request.requestUrl?.encodedPath) {
+                    "/api/status" -> MockResponse().setBody("""{"status":"ready","hermes_version":"0.18.2"}""")
+                    "/api/profiles/sessions" -> when (sessionFetches.incrementAndGet()) {
+                        1 -> MockResponse().setBody("""{"sessions":[]}""")
+                        2 -> {
+                            visibleRefreshStarted.complete(Unit)
+                            MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE)
+                        }
+                        3 -> MockResponse().setBody("""{"sessions":[]}""")
+                        else -> MockResponse().setBody(
+                            """{"sessions":[{"session_id":"session-b","message_count":2}]}""",
+                        )
+                    }
+                    else -> MockResponse().setResponseCode(404)
+                }
+            }
+            server.start()
+            val context = RuntimeEnvironment.getApplication()
+            val backendA = backend(server)
+            val backendB = backendA.copy(id = "work", label = "Work")
+            val registry = BackendRegistry(context, json)
+            val credentials = InMemoryCredentialStore()
+            val gateway = RecordingGateway(json)
+            registry.save(backendA)
+            credentials.put(backendA.id, SESSION_COOKIE)
+            credentials.put(backendB.id, SESSION_COOKIE)
+            val repository = repository(
+                context,
+                registry,
+                credentials,
+                BillingPendingChargeStore(context, json),
+                gateway,
+            )
+            awaitReady(repository, backendA.id)
+
+            val visibleA = launch { repository.refreshSessions() }
+            withTimeout(5_000L) { visibleRefreshStarted.await() }
+            registry.save(backendB)
+            awaitReady(repository, backendB.id)
+
+            repository.refreshSessions(showLoading = false)
+
+            assertEquals(2, repository.state.value.sessions.single().messageCount)
+            visibleA.cancelAndJoin()
+        }
+    }
+
+    @Test
     fun `latest session open wins when an earlier resume finishes last`() = runBlocking {
         MockWebServer().use { server ->
             server.dispatcher = object : Dispatcher() {

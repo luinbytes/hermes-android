@@ -4757,6 +4757,10 @@ class HermesRepository @Inject constructor(
 
     private suspend fun connect(backend: BackendConfig) {
         sessionListMutationMutex.withLock { backendCredentialGeneration.incrementAndGet() }
+        sessionListRefreshPriorityMutex.withLock {
+            visibleSessionListRefreshGeneration.set(0L)
+            pendingSilentSessionListRefresh.set(false)
+        }
         sessionTargetMutex.withLock { archivedSessionTargets.clear() }
         invalidatePendingAttachments()
         providerOAuthPollJob?.cancelAndJoin()
