@@ -1004,7 +1004,7 @@ class HermesRepositoryBillingTest {
             assertFalse(repository.state.value.sessionListLoading)
             assertEquals(null, repository.state.value.error)
 
-            repository.refreshSessions(showLoading = false)
+            repository.refreshSessions()
 
             assertEquals(2, repository.state.value.sessions.single().messageCount)
         }
@@ -1121,7 +1121,7 @@ class HermesRepositoryBillingTest {
     }
 
     @Test
-    fun `silent session refresh ignores missing active credentials`() = runBlocking {
+    fun `silent session refresh handles missing active credentials`() = runBlocking {
         MockWebServer().use { server ->
             server.dispatcher = readyDashboardDispatcher()
             server.start()
@@ -1142,9 +1142,8 @@ class HermesRepositoryBillingTest {
             credentials.remove(backend.id)
 
             repository.refreshSessions(showLoading = false)
+            withTimeout(5_000L) { repository.state.first { it.backend == null } }
 
-            assertEquals(null, repository.state.value.error)
-            assertFalse(repository.state.value.loading)
             assertFalse(repository.state.value.sessionListLoading)
         }
     }
@@ -1208,17 +1207,23 @@ class HermesRepositoryBillingTest {
     }
 
     @Test
-    fun `authentication failure clears visible session refresh state`() = runBlocking {
+    fun `silent authentication failure survives a concurrent session mutation`() = runBlocking {
         MockWebServer().use { server ->
             val sessionFetches = AtomicInteger()
+            val refreshStarted = CompletableDeferred<Unit>()
             server.dispatcher = object : Dispatcher() {
-                override fun dispatch(request: RecordedRequest): MockResponse = when (request.requestUrl?.encodedPath) {
-                    "/api/status" -> MockResponse().setBody("""{"status":"ready","hermes_version":"0.18.2"}""")
-                    "/api/profiles/sessions" -> if (sessionFetches.incrementAndGet() == 1) {
+                override fun dispatch(request: RecordedRequest): MockResponse = when {
+                    request.requestUrl?.encodedPath == "/api/status" ->
+                        MockResponse().setBody("""{"status":"ready","hermes_version":"0.18.2"}""")
+                    request.requestUrl?.encodedPath == "/api/profiles/sessions" && sessionFetches.incrementAndGet() == 1 -> {
                         MockResponse().setBody("""{"sessions":[]}""")
-                    } else {
-                        MockResponse().setResponseCode(401)
                     }
+                    request.requestUrl?.encodedPath == "/api/profiles/sessions" -> {
+                        refreshStarted.complete(Unit)
+                        MockResponse().setHeadersDelay(1, TimeUnit.SECONDS).setResponseCode(401)
+                    }
+                    request.requestUrl?.encodedPath == "/api/sessions/session-1" && request.method == "PATCH" ->
+                        MockResponse().setBody("{}")
                     else -> MockResponse().setResponseCode(404)
                 }
             }
@@ -1238,7 +1243,10 @@ class HermesRepositoryBillingTest {
             )
             awaitReady(repository, backend.id)
 
-            repository.refreshSessions()
+            val refresh = launch { repository.refreshSessions(showLoading = false) }
+            withTimeout(5_000L) { refreshStarted.await() }
+            repository.pinSession(backend.id, StoredSession(sessionId = "session-1", pinned = false))
+            refresh.join()
             withTimeout(5_000L) { repository.state.first { it.backend == null } }
 
             assertFalse(repository.state.value.sessionListLoading)
@@ -1293,6 +1301,7 @@ class HermesRepositoryBillingTest {
 
             assertFalse(repository.state.value.sessionListLoading)
             assertEquals("Chat failed", repository.state.value.error)
+            assertEquals(2, repository.state.value.sessions.single().messageCount)
         }
     }
 

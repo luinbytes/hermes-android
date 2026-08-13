@@ -568,9 +568,16 @@ class HermesRepository @Inject constructor(
 
     suspend fun refreshSessions(showLoading: Boolean = true) {
         val requestCredentialGeneration = backendCredentialGeneration.get()
+        val requestBackendId = mutableState.value.backend?.id
         val credentials = runCatching { activeCredentials(allowRecovery = true) }.getOrElse { error ->
             if (error is CancellationException) throw error
-            if (showLoading) failSessionListRefresh(error)
+            if (
+                backendCredentialGeneration.get() == requestCredentialGeneration &&
+                mutableState.value.backend?.id == requestBackendId &&
+                (showLoading || error.isSessionAuthenticationFailure())
+            ) {
+                failSessionListRefresh(error)
+            }
             return
         }
         val (backend, token) = credentials
@@ -590,7 +597,6 @@ class HermesRepository @Inject constructor(
                 }
             }
         } ?: return
-        val requestOpenSessionGeneration = openSessionGeneration.get()
         val credentialGeneration = requestCredentialGeneration
         mutableState.update { current ->
             if (
@@ -612,7 +618,6 @@ class HermesRepository @Inject constructor(
                         published = false
                         val ownsLoading = current.backend?.id == backend.id &&
                             sessionListRefreshGeneration.get() == refreshGeneration &&
-                            openSessionGeneration.get() == requestOpenSessionGeneration &&
                             backendCredentialGeneration.get() == credentialGeneration
                         if (!ownsLoading) {
                             current
@@ -644,7 +649,6 @@ class HermesRepository @Inject constructor(
                 mutableState.update { current ->
                     val ownsLoading = current.backend?.id == backend.id &&
                         sessionListRefreshGeneration.get() == refreshGeneration &&
-                        openSessionGeneration.get() == requestOpenSessionGeneration &&
                         backendCredentialGeneration.get() == credentialGeneration
                     if (!ownsLoading) {
                         current
@@ -654,10 +658,16 @@ class HermesRepository @Inject constructor(
                     }
                 }
                 if (
+                    error.isSessionAuthenticationFailure() &&
+                    mutableState.value.backend?.id == backend.id &&
+                    sessionListRefreshGeneration.get() == refreshGeneration &&
+                    backendCredentialGeneration.get() == credentialGeneration
+                ) {
+                    failSessionListRefresh(error)
+                } else if (
                     currentRequest &&
                     mutableState.value.backend?.id == backend.id &&
                     sessionListRefreshGeneration.get() == refreshGeneration &&
-                    openSessionGeneration.get() == requestOpenSessionGeneration &&
                     backendCredentialGeneration.get() == credentialGeneration &&
                     sessionListGeneration.get() == requestGeneration
                 ) {
@@ -5248,10 +5258,7 @@ class HermesRepository @Inject constructor(
     }
 
     private fun failSessionListRefresh(error: Throwable) {
-        if (
-            error is ReconnectRequiredException ||
-            (error is com.nousresearch.hermes.network.HermesHttpException && error.statusCode in setOf(401, 403))
-        ) {
+        if (error.isSessionAuthenticationFailure()) {
             fail(error)
         } else {
             mutableState.update {
@@ -5262,6 +5269,10 @@ class HermesRepository @Inject constructor(
             }
         }
     }
+
+    private fun Throwable.isSessionAuthenticationFailure(): Boolean =
+        this is ReconnectRequiredException ||
+            (this is com.nousresearch.hermes.network.HermesHttpException && statusCode in setOf(401, 403))
 
     private fun fail(error: Throwable) {
         val reconnect = error is ReconnectRequiredException || (error is com.nousresearch.hermes.network.HermesHttpException && error.statusCode in setOf(401, 403))

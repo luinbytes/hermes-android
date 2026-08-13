@@ -88,6 +88,9 @@ class SessionInboxLayoutTest {
         assertEquals("Dec 31, 2025", formatSessionTimestamp(epoch("2025-12-31T09:15:00Z"), now, zone, locale))
         assertEquals("", formatSessionTimestamp(0.0, now, zone, locale))
 
+        val frenchDate = formatSessionTimestamp(epoch("2026-07-02T09:15:00Z"), now, zone, Locale.FRANCE)
+        assertTrue(frenchDate.indexOf('2') < frenchDate.lowercase(Locale.FRANCE).indexOf("juil"))
+
         val deviceTimeFormat = SimpleDateFormat("HH:mm", locale).apply {
             timeZone = TimeZone.getTimeZone(zone)
         }

@@ -2065,7 +2065,7 @@ private fun SessionRail(
                         }
                     }
                     items(remoteResults, key = { "search:${it.profile}:${it.sessionId}" }) { result ->
-                        SearchResultRow(result, timestampNowMillis, timeFormat) {
+                        SearchResultRow(result) {
                             onSession(
                                 StoredSession(
                                     sessionId = result.sessionId,
@@ -2193,8 +2193,6 @@ private fun SessionRail(
 @Composable
 private fun SearchResultRow(
     result: SessionSearchHit,
-    nowMillis: Long,
-    timeFormat: java.text.DateFormat,
     onClick: () -> Unit,
 ) {
     Column(Modifier.fillMaxWidth()) {
@@ -2230,11 +2228,6 @@ private fun SearchResultRow(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
-                }
-                formatSessionTimestamp(result.sessionStarted, nowMillis, timeFormat = timeFormat)
-                    .takeIf(String::isNotEmpty)?.let { timestamp ->
-                    Spacer(Modifier.width(8.dp))
-                    Text(timestamp, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
         }
@@ -2514,8 +2507,12 @@ internal fun formatSessionTimestamp(
             ?: value.format(DateTimeFormatter.ofLocalizedTime(FormatStyle.SHORT).withLocale(locale))
         daysAgo == 1L -> "Yesterday"
         daysAgo in 2L..6L -> value.format(DateTimeFormatter.ofPattern("EEE", locale))
-        value.year == now.year -> value.format(DateTimeFormatter.ofPattern("MMM d", locale))
-        else -> value.format(DateTimeFormatter.ofPattern("MMM d, uuuu", locale))
+        value.year == now.year -> value.format(
+            DateTimeFormatter.ofPattern(android.text.format.DateFormat.getBestDateTimePattern(locale, "MMMd"), locale),
+        )
+        else -> value.format(
+            DateTimeFormatter.ofPattern(android.text.format.DateFormat.getBestDateTimePattern(locale, "yMMMd"), locale),
+        )
     }
 }
 
