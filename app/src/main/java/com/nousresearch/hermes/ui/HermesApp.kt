@@ -210,6 +210,7 @@ import com.nousresearch.hermes.data.PendingAttachment
 import com.nousresearch.hermes.data.AttachmentPhase
 import com.nousresearch.hermes.data.ProfileIdentityDraft
 import com.nousresearch.hermes.data.SlashSuggestion
+import com.nousresearch.hermes.data.normalizedProfile
 import com.nousresearch.hermes.domain.MessageRole
 import com.nousresearch.hermes.domain.ComposerBrowseState
 import com.nousresearch.hermes.domain.ComposerHistory
@@ -2022,8 +2023,8 @@ private fun SessionRail(
                             }
                         }
                         items(sessions, key = { "${it.profile}:${it.durableId}" }) { session ->
-                            val selected = state.activeStoredSession?.let {
-                                it.durableId == session.durableId && it.profile == session.profile
+                            val selected = state.activeStoredSession?.let { activeSession ->
+                                sameSession(activeSession, session)
                             } == true
                             val active = session.isActive || (selected && state.runtimeSessionId != null)
                             val displayedBackendId = state.backend?.id.orEmpty()
@@ -2464,6 +2465,10 @@ internal fun SessionRow(
         HorizontalDivider(Modifier.padding(start = horizontalPadding + avatarSize + 12.dp))
     }
 }
+
+internal fun sameSession(first: StoredSession, second: StoredSession): Boolean =
+    first.durableId == second.durableId &&
+        first.profile.normalizedProfile() == second.profile.normalizedProfile()
 
 internal fun sessionSummary(session: StoredSession): String {
     val metadataLabel = listOf(session.model, session.provider, session.source)

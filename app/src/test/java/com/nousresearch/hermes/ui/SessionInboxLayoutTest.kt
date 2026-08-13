@@ -49,6 +49,14 @@ class SessionInboxLayoutTest {
     }
 
     @Test
+    fun blankSessionProfileMatchesTheDefaultActiveProfile() {
+        val active = StoredSession(sessionId = "session-1", profile = "default")
+        val listed = StoredSession(sessionId = "session-1", profile = "")
+
+        assertTrue(sameSession(active, listed))
+    }
+
+    @Test
     fun summaryUsesAvailableSessionMetadataWithoutInventingMessageContent() {
         assertEquals(
             "default · hermes-4 · 7 messages",
