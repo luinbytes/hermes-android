@@ -951,7 +951,7 @@ internal fun OnboardingScreen(
                         horizontalArrangement = Arrangement.SpaceBetween,
                     ) {
                         Column(Modifier.weight(1f)) {
-                            Text("Allow private-network HTTP", style = MaterialTheme.typography.titleMedium)
+                            Text("Use private-network HTTP", style = MaterialTheme.typography.titleMedium)
                             Text("Only literal LAN, loopback or Tailscale IPs. HTTPS is required otherwise.", style = MaterialTheme.typography.bodySmall)
                         }
                         Switch(checked = privateHttp, onCheckedChange = null)
