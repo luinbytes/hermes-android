@@ -242,13 +242,13 @@ private fun BackendConnectionDialog(
                 )
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
-                        Text("Allow private-network HTTP")
+                        Text("Use private-network HTTP")
                         Text("Only literal LAN, loopback, or Tailscale IPs.", style = MaterialTheme.typography.bodySmall)
                     }
                     Switch(
                         checked = allowPrivate,
                         onCheckedChange = { allowPrivate = it; clearProviderSelection() },
-                        modifier = Modifier.semantics { contentDescription = "Allow private-network HTTP" },
+                        modifier = Modifier.semantics { contentDescription = "Use private-network HTTP" },
                     )
                 }
                 if (passwordProviders.size > 1 && providerSource == providerKey) {
