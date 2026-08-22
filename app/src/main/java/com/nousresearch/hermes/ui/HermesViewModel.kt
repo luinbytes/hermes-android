@@ -393,6 +393,20 @@ class HermesViewModel @Inject constructor(
     fun setBotHidden(profile: String, hidden: Boolean) = viewModelScope.launch {
         repository.setBotHidden(profile, hidden)
     }
+    suspend fun createBotGroup(name: String, members: List<com.nousresearch.hermes.protocol.BotGroupMember>) =
+        repository.createBotGroup(name, members)
+    suspend fun botGroupCandidates() = repository.botGroupCandidates()
+    suspend fun updateBotGroup(room: com.nousresearch.hermes.protocol.BotGroupRoom) = repository.updateBotGroup(room)
+    suspend fun disbandBotGroup(roomId: String) = repository.disbandBotGroup(roomId)
+    suspend fun sendBotGroupMessage(
+        roomId: String,
+        text: String,
+        thread: String,
+        attachments: List<com.nousresearch.hermes.protocol.BotGroupAttachment>,
+    ) = repository.sendBotGroupMessage(roomId, text, thread, attachments)
+    fun acknowledgeBotGroup(roomId: String) = repository.acknowledgeBotGroup(roomId)
+    suspend fun answerBotGroupBlocking(requestId: String, answers: Map<String, List<String>>) =
+        repository.answerBotGroupBlocking(requestId, answers)
     suspend fun describeBotAgent(profile: String) = repository.describeBotAgent(profile)
     suspend fun createBotAgent(
         draft: com.nousresearch.hermes.data.BotAgentDraft,

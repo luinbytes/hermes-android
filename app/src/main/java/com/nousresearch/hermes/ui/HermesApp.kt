@@ -83,6 +83,7 @@ import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.Forum
+import androidx.compose.material.icons.outlined.Group
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.Key
@@ -334,6 +335,13 @@ private data class ManagementActions(
     val refreshProfiles: () -> Unit,
     val refreshBotRoster: () -> Unit,
     val setBotHidden: (String, Boolean) -> Unit,
+    val createBotGroup: suspend (String, List<com.nousresearch.hermes.protocol.BotGroupMember>) -> com.nousresearch.hermes.protocol.BotGroupRoom,
+    val botGroupCandidates: suspend () -> com.nousresearch.hermes.protocol.BotGroupCandidateResult,
+    val updateBotGroup: suspend (com.nousresearch.hermes.protocol.BotGroupRoom) -> com.nousresearch.hermes.protocol.BotGroupRoom,
+    val disbandBotGroup: suspend (String) -> Unit,
+    val sendBotGroupMessage: suspend (String, String, String, List<com.nousresearch.hermes.protocol.BotGroupAttachment>) -> Unit,
+    val acknowledgeBotGroup: (String) -> Unit,
+    val answerBotGroupBlocking: suspend (String, Map<String, List<String>>) -> Unit,
     val describeBotAgent: suspend (String) -> ProfileDescription,
     val createBotAgent: suspend (BotAgentDraft, String, String?, Boolean, Boolean, Boolean) -> Boolean,
     val configureBotAgent: suspend (BotAgentDraft) -> Unit,
@@ -484,6 +492,13 @@ fun HermesApp(
             refreshProfiles = viewModel::refreshProfiles,
             refreshBotRoster = viewModel::refreshBotRoster,
             setBotHidden = viewModel::setBotHidden,
+            createBotGroup = viewModel::createBotGroup,
+            botGroupCandidates = viewModel::botGroupCandidates,
+            updateBotGroup = viewModel::updateBotGroup,
+            disbandBotGroup = viewModel::disbandBotGroup,
+            sendBotGroupMessage = viewModel::sendBotGroupMessage,
+            acknowledgeBotGroup = viewModel::acknowledgeBotGroup,
+            answerBotGroupBlocking = viewModel::answerBotGroupBlocking,
             describeBotAgent = viewModel::describeBotAgent,
             createBotAgent = viewModel::createBotAgent,
             configureBotAgent = viewModel::configureBotAgent,
@@ -1202,6 +1217,23 @@ private fun HermesWorkspace(
             mutableStateOf(emptyList<String>())
         }
         var requestedProfileEditor by rememberSaveable(backendId) { mutableStateOf<String?>(null) }
+        var selectedBotGroupId by rememberSaveable(backendId) { mutableStateOf<String?>(null) }
+        var editingBotGroupId by rememberSaveable(backendId) { mutableStateOf<String?>(null) }
+        var botGroupCandidates by remember(backendId) {
+            mutableStateOf<List<com.nousresearch.hermes.protocol.BotGroupCandidate>>(emptyList())
+        }
+        var botGroupCandidatesLoading by remember(backendId) { mutableStateOf(false) }
+        var unavailableBotGroupSources by remember(backendId) { mutableStateOf<List<String>>(emptyList()) }
+        val selectedBotGroup = state.botGroups.rooms.firstOrNull { it.roomId == selectedBotGroupId }
+        LaunchedEffect(editingBotGroupId) {
+            if (editingBotGroupId != null) {
+                botGroupCandidatesLoading = true
+                val result = managementActions.botGroupCandidates()
+                botGroupCandidates = result.candidates
+                unavailableBotGroupSources = result.unavailableSources
+                botGroupCandidatesLoading = false
+            }
+        }
         val timelineTools = state.timeline.items.filterIsInstance<TimelineItem.Tool>()
         val availableToolIds = timelineTools.mapTo(mutableSetOf()) { it.id }
         val supportingTool = timelineTools.firstOrNull { it.id == supportingToolId }
@@ -1211,6 +1243,7 @@ private fun HermesWorkspace(
         }
         var pendingNewConversationFromId by remember { mutableStateOf<String?>(null) }
         val openStoredSession: (StoredSession) -> Unit = { session ->
+            selectedBotGroupId = null
             pendingNewConversationFromId = null
             onRecovery(null)
             navigator.openConversation(
@@ -1238,6 +1271,7 @@ private fun HermesWorkspace(
             }
         }
         val openBotChat: (BotConversation) -> Unit = { bot ->
+            selectedBotGroupId = null
             sessionActions.openBotChat(bot.profile.name) { session ->
                 session?.let(openStoredSession)
             }
@@ -1248,6 +1282,11 @@ private fun HermesWorkspace(
         val editBot: (String) -> Unit = { name ->
             requestedProfileEditor = name
             openProfiles()
+        }
+        val openBotGroup: (com.nousresearch.hermes.protocol.BotGroupRoom) -> Unit = { room ->
+            selectedBotGroupId = room.roomId
+            managementActions.acknowledgeBotGroup(room.roomId)
+            navigator.openChats(backendId, profileId)
         }
         fun navigate(destination: WorkspaceContent) {
             onRecovery(null)
@@ -1357,7 +1396,20 @@ private fun HermesWorkspace(
         ) {
             @Composable
             fun ConversationContent() {
-                if (conversationReady) {
+                if (selectedBotGroup != null) {
+                    BotGroupConversationScreen(
+                        room = selectedBotGroup,
+                        running = state.botGroups.runningRoomId == selectedBotGroup.roomId,
+                        onSend = { text, thread, attachments ->
+                            managementActions.sendBotGroupMessage(selectedBotGroup.roomId, text, thread, attachments)
+                        },
+                        onEdit = { editingBotGroupId = selectedBotGroup.roomId },
+                        blockingRequests = state.botGroups.blockingRequests.filter { it.roomId == selectedBotGroup.roomId },
+                        onAnswerBlocking = managementActions.answerBotGroupBlocking,
+                        onBack = if (compact) ({ navigator.openAtlas(backendId, profileId) }) else null,
+                        modifier = Modifier.weight(1f),
+                    )
+                } else if (conversationReady) {
                     ChatSurface(
                         state, connection, profileId, onSend, onSteer, onDraftChange, onCompleteSlash, onExecuteSlash,
                         onAttach, onRetryAttachment, onCancelAttachment, onRemoveAttachment, onInterrupt,
@@ -1620,6 +1672,7 @@ private fun HermesWorkspace(
                             state, connection, onRefresh, onSearchSessions,
                             onSession = openStoredSession,
                             onBot = openBotChat,
+                            onGroup = openBotGroup,
                             onSetBotHidden = managementActions.setBotHidden,
                             onLoadBotAvatar = managementActions.profileAvatar,
                             onDeleteSession = onDeleteSession,
@@ -1630,6 +1683,8 @@ private fun HermesWorkspace(
                             onAutomations = { navigator.openAutomations(backendId, profileId) },
                             onManage = { navigator.openManage(backendId, profileId) },
                             onProfiles = openProfiles,
+                            onCreateGroup = { editingBotGroupId = "" },
+                            selectedBotGroupId = selectedBotGroupId,
                             onEditBot = editBot,
                             onAppSettings = { navigator.openAppSettings() },
                             onBackends = { navigate(WorkspaceContent.BACKENDS) },
@@ -1668,6 +1723,7 @@ private fun HermesWorkspace(
                         state, connection, onRefresh, onSearchSessions,
                         onSession = openStoredSession,
                         onBot = openBotChat,
+                        onGroup = openBotGroup,
                         onSetBotHidden = managementActions.setBotHidden,
                         onLoadBotAvatar = managementActions.profileAvatar,
                         onDeleteSession = onDeleteSession,
@@ -1678,6 +1734,8 @@ private fun HermesWorkspace(
                         onAutomations = { navigator.openAutomations(backendId, profileId) },
                         onManage = { navigator.openManage(backendId, profileId) },
                         onProfiles = openProfiles,
+                        onCreateGroup = { editingBotGroupId = "" },
+                        selectedBotGroupId = selectedBotGroupId,
                         onEditBot = editBot,
                         onAppSettings = { navigator.openAppSettings() },
                         onBackends = { navigate(WorkspaceContent.BACKENDS) },
@@ -1717,6 +1775,33 @@ private fun HermesWorkspace(
                     conversationReady = conversationReady,
                 )
             }
+        }
+
+        editingBotGroupId?.let { roomId ->
+            val room = state.botGroups.rooms.firstOrNull { it.roomId == roomId }
+            BotGroupEditorDialog(
+                room = room,
+                candidates = botGroupCandidates,
+                candidatesLoading = botGroupCandidatesLoading,
+                unavailableSources = unavailableBotGroupSources,
+                onDismiss = { editingBotGroupId = null },
+                onSave = { name, members, image ->
+                    val saved = if (room == null) {
+                        managementActions.createBotGroup(name, members).let { created ->
+                            if (image != null) managementActions.updateBotGroup(created.copy(image = image)) else created
+                        }
+                    } else {
+                        managementActions.updateBotGroup(room.copy(name = name, members = members, image = image))
+                    }
+                    selectedBotGroupId = saved.roomId
+                },
+                onDisband = room?.let { current ->
+                    suspend {
+                        managementActions.disbandBotGroup(current.roomId)
+                        if (selectedBotGroupId == current.roomId) selectedBotGroupId = null
+                    }
+                },
+            )
         }
 
         val authoritativeReady = state.status != null && connection == GatewayConnectionState.Open
@@ -1948,6 +2033,7 @@ private fun SessionRail(
     onSearchSessions: (String) -> Unit,
     onSession: (StoredSession) -> Unit,
     onBot: (BotConversation) -> Unit,
+    onGroup: (com.nousresearch.hermes.protocol.BotGroupRoom) -> Unit,
     onSetBotHidden: (String, Boolean) -> Unit,
     onLoadBotAvatar: suspend (String) -> ProfileAsset,
     onDeleteSession: (StoredSession) -> Unit,
@@ -1958,6 +2044,8 @@ private fun SessionRail(
     onAutomations: () -> Unit,
     onManage: () -> Unit,
     onProfiles: () -> Unit,
+    onCreateGroup: () -> Unit,
+    selectedBotGroupId: String?,
     onEditBot: (String) -> Unit,
     onAppSettings: () -> Unit,
     onBackends: () -> Unit,
@@ -2158,14 +2246,33 @@ private fun SessionRail(
                 ) {
                     if (inboxMode == ChatInboxMode.BOTS) {
                         item("bots-create") {
-                            Button(
-                                onClick = onProfiles,
-                                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+                            Row(
+                                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
                             ) {
-                                Icon(Icons.Outlined.Add, null)
-                                Spacer(Modifier.width(6.dp))
-                                Text("New agent")
+                                Button(onClick = onProfiles, modifier = Modifier.weight(1f)) {
+                                    Icon(Icons.Outlined.Add, null)
+                                    Spacer(Modifier.width(6.dp))
+                                    Text("Agent")
+                                }
+                                OutlinedButton(onClick = onCreateGroup, modifier = Modifier.weight(1f)) {
+                                    Icon(Icons.Outlined.Group, null)
+                                    Spacer(Modifier.width(6.dp))
+                                    Text("Group")
+                                }
                             }
+                        }
+                        items(state.botGroups.rooms.filter { room ->
+                            query.isBlank() || listOf(room.name, room.members.joinToString { it.name }, room.log.lastOrNull()?.text.orEmpty())
+                                .any { it.contains(query.trim(), ignoreCase = true) }
+                        }, key = { "group:${it.roomId}" }) { room ->
+                            BotGroupRow(
+                                room = room,
+                                selected = selectedBotGroupId == room.roomId,
+                                running = state.botGroups.runningRoomId == room.roomId,
+                                needsYou = room.roomId in state.botGroups.needsYouRoomIds,
+                                onClick = { onGroup(room) },
+                            )
                         }
                         items(visibleBots, key = { "bot:${it.profile.name}" }) { bot ->
                             BotRow(

@@ -7,6 +7,7 @@ import com.nousresearch.hermes.network.DashboardAuthClient
 import com.nousresearch.hermes.network.DashboardSessionCredential
 import com.nousresearch.hermes.network.HermesRestClient
 import com.nousresearch.hermes.domain.TimelineItem
+import com.nousresearch.hermes.protocol.BotGroupSnapshot
 import com.nousresearch.hermes.protocol.GatewayConnectionState
 import com.nousresearch.hermes.protocol.GatewayEvent
 import com.nousresearch.hermes.protocol.HermesGatewayClient
@@ -170,6 +171,448 @@ class HermesRepositoryBillingTest {
             assertTrue(scoped.requests.any { it.method == "profiles.create" })
             assertTrue(scoped.requests.any { it.method == "prompt.submit" })
             assertFalse(gateway.requests.any { it.method == "profiles.create" })
+        }
+    }
+
+    @Test
+    fun `group creation retries CAS with one durable room identity`() = runBlocking {
+        MockWebServer().use { server ->
+            server.dispatcher = readyDashboardDispatcher(withProfiles = true)
+            server.start()
+            val context = RuntimeEnvironment.getApplication()
+            val backend = backend(server)
+            val registry = BackendRegistry(context, json)
+            val credentials = InMemoryCredentialStore()
+            val gateway = RecordingGateway(json)
+            registry.save(backend)
+            credentials.put(backend.id, SESSION_COOKIE)
+            val repository = repository(context, registry, credentials, BillingPendingChargeStore(context, json), gateway)
+            awaitReady(repository, backend.id)
+            gateway.enqueue(
+                "profiles.list",
+                json.parseToJsonElement("""{"profiles":[{"name":"default","ui_meta_revisions":{"hermes-bots-groups":4}}]}"""),
+            )
+            gateway.enqueue("profiles.configure", json.parseToJsonElement("""{"applied":{"ui_meta":false}}"""))
+            gateway.enqueue(
+                "profiles.list",
+                json.parseToJsonElement("""{"profiles":[{"name":"default","ui_meta_revisions":{"hermes-bots-groups":5}}]}"""),
+            )
+            gateway.enqueue(
+                "profiles.configure",
+                json.parseToJsonElement("""{"applied":{"ui_meta":true,"ui_meta_revisions":{"hermes-bots-groups":6}}}"""),
+            )
+            listOf("coder", "reviewer").forEach { member ->
+                gateway.enqueue("profiles.list", json.parseToJsonElement("""{"profiles":[{"name":"$member"}]}"""))
+                gateway.enqueue("profiles.configure", json.parseToJsonElement("""{"applied":{"ui_meta":true}}"""))
+            }
+
+            val room = repository.createBotGroup(
+                "Launch",
+                listOf(
+                    com.nousresearch.hermes.protocol.BotGroupMember("coder", "coder-mac", backend.id),
+                    com.nousresearch.hermes.protocol.BotGroupMember("reviewer", "reviewer-mac", backend.id),
+                ),
+            )
+
+            assertTrue(room.roomId.isNotBlank())
+            assertEquals(room.roomId, repository.state.value.botGroups.rooms.single().roomId)
+            val writes = gateway.requests.filter { it.method == "profiles.configure" }.map { it.params.toString() }
+            assertEquals(4, writes.size)
+            assertTrue(writes[0].contains("\"hermes-bots-groups\":4"))
+            assertTrue(writes[1].contains("\"hermes-bots-groups\":5"))
+            val roomId = Regex("\"roomId\":\"([^\"]+)\"").find(writes[0])!!.groupValues[1]
+            assertTrue(writes[1].contains("\"roomId\":\"$roomId\""))
+            assertTrue(writes[2].contains("\"name\":\"coder\""))
+            assertTrue(writes[2].contains("\"groups\":[\"Launch\"]"))
+            assertTrue(writes[3].contains("\"name\":\"reviewer\""))
+        }
+    }
+
+    @Test
+    fun `group candidates qualify same named bots across reachable sources`() = runBlocking {
+        MockWebServer().use { server ->
+            server.dispatcher = readyDashboardDispatcher()
+            server.start()
+            val context = RuntimeEnvironment.getApplication()
+            val current = backend(server)
+            val remote = current.copy(id = "remote-${BACKEND_IDS.incrementAndGet()}", label = "Cloud Box")
+            val remoteTwin = current.copy(id = "remote-twin-${BACKEND_IDS.incrementAndGet()}", label = "Cloud Box")
+            val registry = BackendRegistry(context, json)
+            val credentials = InMemoryCredentialStore()
+            val gateway = RecordingGateway(json)
+            val scoped = RecordingGateway(json)
+            gateway.forkedGateway = scoped
+            registry.save(current)
+            registry.save(remote)
+            registry.save(remoteTwin)
+            registry.select(current.id)
+            credentials.put(current.id, SESSION_COOKIE)
+            credentials.put(remote.id, SESSION_COOKIE)
+            credentials.put(remoteTwin.id, SESSION_COOKIE)
+            val repository = repository(context, registry, credentials, BillingPendingChargeStore(context, json), gateway)
+            awaitReady(repository, current.id)
+            gateway.enqueue("profiles.list", json.parseToJsonElement("""{"profiles":[{"name":"coder"}]}"""))
+            scoped.enqueue("profiles.list", json.parseToJsonElement("""{"profiles":[{"name":"coder"}]}"""))
+            scoped.enqueue("profiles.list", json.parseToJsonElement("""{"profiles":[{"name":"coder"}]}"""))
+
+            val result = repository.botGroupCandidates()
+
+            assertEquals(
+                listOf("coder-cloud-box", "coder-cloud-box-2", "coder-personal"),
+                result.candidates.map { it.handle }.sorted(),
+            )
+            assertEquals(result.candidates.size, result.candidates.map { it.handle.lowercase() }.toSet().size)
+            assertEquals(current.id, repository.state.value.backend?.id)
+            assertEquals(listOf(remote.id, remoteTwin.id), scoped.connectedBackendIds)
+        }
+    }
+
+    @Test
+    fun `group room metadata is synchronized to every reachable source`() = runBlocking {
+        MockWebServer().use { server ->
+            server.dispatcher = readyDashboardDispatcher(withProfiles = true)
+            server.start()
+            val context = RuntimeEnvironment.getApplication()
+            val current = backend(server).copy(id = "personal", label = "Personal")
+            val remote = current.copy(id = "cloud", label = "Cloud box")
+            val registry = BackendRegistry(context, json)
+            val credentials = InMemoryCredentialStore()
+            val gateway = RecordingGateway(json)
+            val scoped = RecordingGateway(json)
+            gateway.forkedGateway = scoped
+            registry.save(current)
+            registry.save(remote)
+            registry.select(current.id)
+            credentials.put(current.id, SESSION_COOKIE)
+            credentials.put(remote.id, SESSION_COOKIE)
+            val repository = repository(context, registry, credentials, BillingPendingChargeStore(context, json), gateway)
+            awaitReady(repository, current.id)
+            gateway.enqueue("profiles.list", json.parseToJsonElement("""{"profiles":[{"name":"default","ui_meta_revisions":{"hermes-bots-groups":2}}]}"""))
+            gateway.enqueue("profiles.configure", json.parseToJsonElement("""{"applied":{"ui_meta":true,"ui_meta_revisions":{"hermes-bots-groups":3}}}"""))
+            scoped.enqueue("profiles.list", json.parseToJsonElement("""{"profiles":[{"name":"default","ui_meta_revisions":{"hermes-bots-groups":5}}]}"""))
+            scoped.enqueue("profiles.configure", json.parseToJsonElement("""{"applied":{"ui_meta":true,"ui_meta_revisions":{"hermes-bots-groups":6}}}"""))
+            gateway.enqueue("profiles.list", json.parseToJsonElement("""{"profiles":[{"name":"coder"}]}"""))
+            gateway.enqueue("profiles.configure", json.parseToJsonElement("""{"applied":{"ui_meta":true}}"""))
+            scoped.enqueue("profiles.list", json.parseToJsonElement("""{"profiles":[{"name":"reviewer"}]}"""))
+            scoped.enqueue("profiles.configure", json.parseToJsonElement("""{"applied":{"ui_meta":true}}"""))
+
+            val room = repository.createBotGroup(
+                "Launch",
+                listOf(
+                    com.nousresearch.hermes.protocol.BotGroupMember("coder", "coder-personal", current.id),
+                    com.nousresearch.hermes.protocol.BotGroupMember("reviewer", "reviewer-cloud", remote.id),
+                ),
+            )
+
+            val localMetadata = gateway.requests.first { request ->
+                request.method == "profiles.configure" && request.params.toString().contains("hermes-bots-groups")
+            }.params.toString()
+            val remoteMetadata = scoped.requests.first { request ->
+                request.method == "profiles.configure" && request.params.toString().contains("hermes-bots-groups")
+            }.params.toString()
+            assertTrue(localMetadata.contains(room.roomId))
+            assertTrue(remoteMetadata.contains(room.roomId))
+            assertEquals(current.id, repository.state.value.backend?.id)
+        }
+    }
+
+    @Test
+    fun `offline group source is replayed automatically after reconnect`() = runBlocking {
+        MockWebServer().use { server ->
+            server.dispatcher = readyDashboardDispatcher(withProfiles = true)
+            server.start()
+            val context = RuntimeEnvironment.getApplication()
+            val current = backend(server).copy(id = "retry-personal", label = "Personal")
+            val remote = current.copy(id = "retry-cloud", label = "Cloud")
+            val registry = BackendRegistry(context, json)
+            val credentials = InMemoryCredentialStore()
+            val gateway = RecordingGateway(json)
+            val scoped = RecordingGateway(json)
+            gateway.forkedGateway = scoped
+            registry.backends.first().forEach { registry.remove(it.id) }
+            registry.save(current)
+            registry.save(remote)
+            registry.select(current.id)
+            credentials.put(current.id, SESSION_COOKIE)
+            credentials.put(remote.id, SESSION_COOKIE)
+            val repository = repository(context, registry, credentials, BillingPendingChargeStore(context, json), gateway)
+            awaitReady(repository, current.id)
+            val members = listOf(
+                com.nousresearch.hermes.protocol.BotGroupMember("coder", "coder", current.id),
+                com.nousresearch.hermes.protocol.BotGroupMember("reviewer", "reviewer", current.id),
+            )
+            gateway.enqueue("profiles.list", json.parseToJsonElement("""{"profiles":[{"name":"default"}]}"""))
+            gateway.enqueue("profiles.configure", json.parseToJsonElement("""{"applied":{"ui_meta":true}}"""))
+            scoped.enqueueFailure("profiles.list", IOException("offline"))
+            members.forEach { member ->
+                gateway.enqueue("profiles.list", json.parseToJsonElement("""{"profiles":[{"name":"${member.name}"}]}"""))
+                gateway.enqueue("profiles.configure", json.parseToJsonElement("""{"applied":{"ui_meta":true}}"""))
+            }
+
+            val room = repository.createBotGroup("Launch", members)
+            assertTrue(repository.state.value.botGroups.error.orEmpty().contains("sync will retry"))
+            val snapshot = BotGroupSnapshot().upsert(room, System.currentTimeMillis()).asUiMeta(json)
+            gateway.enqueue(
+                "profiles.list",
+                json.parseToJsonElement("""{"profiles":[{"name":"default","ui_meta":{"hermes-bots-groups":$snapshot}}]}"""),
+            )
+            gateway.enqueue("profiles.configure", json.parseToJsonElement("""{"applied":{"ui_meta":true}}"""))
+            scoped.enqueue("profiles.list", json.parseToJsonElement("""{"profiles":[{"name":"default"}]}"""))
+            scoped.enqueue("profiles.configure", json.parseToJsonElement("""{"applied":{"ui_meta":true}}"""))
+
+            runCatching {
+                withTimeout(8_000) { repository.state.first { it.botGroups.error == null } }
+            }.getOrElse {
+                error(
+                    "retry error=${repository.state.value.botGroups.error} " +
+                        "local=${gateway.requests.groupingBy { request -> request.method }.eachCount()} " +
+                        "remote=${scoped.requests.groupingBy { request -> request.method }.eachCount()}",
+                )
+            }
+
+            assertTrue(scoped.requests.any {
+                it.method == "profiles.configure" && it.params.toString().contains(room.roomId)
+            })
+        }
+    }
+
+    @Test
+    fun `group driver stops at ten generated messages within three rounds`() = runBlocking {
+        MockWebServer().use { server ->
+            server.dispatcher = readyDashboardDispatcher(withProfiles = true)
+            server.start()
+            val context = RuntimeEnvironment.getApplication()
+            val backend = backend(server)
+            val registry = BackendRegistry(context, json)
+            val credentials = InMemoryCredentialStore()
+            val gateway = RecordingGateway(json)
+            registry.backends.first().forEach { registry.remove(it.id) }
+            registry.save(backend)
+            credentials.put(backend.id, SESSION_COOKIE)
+            val repository = repository(context, registry, credentials, BillingPendingChargeStore(context, json), gateway)
+            awaitReady(repository, backend.id)
+            val members = (1..4).map { index ->
+                com.nousresearch.hermes.protocol.BotGroupMember("bot$index", "bot$index", backend.id)
+            }
+            gateway.enqueue("profiles.list", json.parseToJsonElement("""{"profiles":[{"name":"default"}]}"""))
+            gateway.enqueue("profiles.configure", json.parseToJsonElement("""{"applied":{"ui_meta":true}}"""))
+            members.forEach { member ->
+                gateway.enqueue("profiles.list", json.parseToJsonElement("""{"profiles":[{"name":"${member.name}"}]}"""))
+                gateway.enqueue("profiles.configure", json.parseToJsonElement("""{"applied":{"ui_meta":true}}"""))
+            }
+            repeat(31) {
+                gateway.enqueue("profiles.list", json.parseToJsonElement("""{"profiles":[{"name":"default"}]}"""))
+                gateway.enqueue("profiles.configure", json.parseToJsonElement("""{"applied":{"ui_meta":true}}"""))
+            }
+            val room = repository.createBotGroup("Launch", members)
+            repeat(10) { index ->
+                gateway.enqueue("session.list", json.parseToJsonElement("""{"sessions":[]}"""))
+                gateway.enqueue(
+                    "session.create",
+                    json.parseToJsonElement("""{"session_id":"live-$index","stored_session_id":"stored-$index"}"""),
+                )
+                gateway.enqueue("prompt.submit", json.parseToJsonElement("""{"status":"streaming"}"""))
+                gateway.enqueue(
+                    "session.resume",
+                    json.parseToJsonElement(
+                        """{"session_id":"live-$index","session_key":"stored-$index","messages":[{"role":"assistant","text":"reply $index"}]}""",
+                    ),
+                )
+            }
+
+            repository.sendBotGroupMessage(room.roomId, "Ship it")
+
+            assertEquals(10, gateway.requests.count { it.method == "prompt.submit" })
+            assertEquals(12, repository.state.value.botGroups.rooms.single().log.size)
+            assertEquals(null, repository.state.value.botGroups.runningRoomId)
+        }
+    }
+
+    @Test
+    fun `group approval stays visible and routes to the member session`() = runBlocking {
+        MockWebServer().use { server ->
+            server.dispatcher = readyDashboardDispatcher(withProfiles = true)
+            server.start()
+            val context = RuntimeEnvironment.getApplication()
+            val backend = backend(server)
+            val registry = BackendRegistry(context, json)
+            val credentials = InMemoryCredentialStore()
+            val gateway = RecordingGateway(json)
+            registry.save(backend)
+            credentials.put(backend.id, SESSION_COOKIE)
+            val repository = repository(context, registry, credentials, BillingPendingChargeStore(context, json), gateway)
+            awaitReady(repository, backend.id)
+            val members = listOf(
+                com.nousresearch.hermes.protocol.BotGroupMember("coder", "coder", backend.id),
+                com.nousresearch.hermes.protocol.BotGroupMember("reviewer", "reviewer", backend.id),
+            )
+            gateway.enqueue("profiles.list", json.parseToJsonElement("""{"profiles":[{"name":"default"}]}"""))
+            gateway.enqueue("profiles.configure", json.parseToJsonElement("""{"applied":{"ui_meta":true}}"""))
+            members.forEach { member ->
+                gateway.enqueue("profiles.list", json.parseToJsonElement("""{"profiles":[{"name":"${member.name}"}]}"""))
+                gateway.enqueue("profiles.configure", json.parseToJsonElement("""{"applied":{"ui_meta":true}}"""))
+            }
+            repeat(5) {
+                gateway.enqueue("profiles.list", json.parseToJsonElement("""{"profiles":[{"name":"default"}]}"""))
+                gateway.enqueue("profiles.configure", json.parseToJsonElement("""{"applied":{"ui_meta":true}}"""))
+            }
+            val room = repository.createBotGroup("Launch", members)
+            repeat(2) { index ->
+                gateway.enqueue("session.list", json.parseToJsonElement("""{"sessions":[]}"""))
+                gateway.enqueue("session.create", json.parseToJsonElement("""{"session_id":"live-$index","stored_session_id":"stored-$index"}"""))
+                gateway.enqueue("prompt.submit", json.parseToJsonElement("""{"status":"streaming"}"""))
+            }
+            gateway.enqueue(
+                "session.resume",
+                json.parseToJsonElement(
+                    """{"session_id":"live-0","pending_approval":{"request_id":"approve-1","command":"deploy","description":"Deploy now?","choices":["once","deny"]}}""",
+                ),
+            )
+            gateway.enqueue(
+                "session.resume",
+                json.parseToJsonElement("""{"session_id":"live-0","messages":[{"role":"assistant","text":"(pass)"}]}"""),
+            )
+            gateway.enqueue(
+                "session.resume",
+                json.parseToJsonElement("""{"session_id":"live-1","messages":[{"role":"assistant","text":"pass"}]}"""),
+            )
+            gateway.enqueue("approval.respond", json.parseToJsonElement("""{"ok":true}"""))
+
+            val sending = launch { repository.sendBotGroupMessage(room.roomId, "Can we deploy?") }
+            val pending = withTimeout(5_000) {
+                repository.state.first { it.botGroups.blockingRequests.isNotEmpty() }
+            }.botGroups.blockingRequests.single()
+            assertTrue(room.roomId in repository.state.value.botGroups.needsYouRoomIds)
+
+            repository.answerBotGroupBlocking(pending.requestId, mapOf("choice" to listOf("once")))
+            sending.join()
+
+            val response = gateway.requests.single { it.method == "approval.respond" }.params.toString()
+            assertTrue(response.contains("\"session_id\":\"live-0\""))
+            assertTrue(response.contains("\"request_id\":\"approve-1\""))
+            assertTrue(response.contains("\"choice\":\"once\""))
+            assertTrue(repository.state.value.botGroups.blockingRequests.isEmpty())
+        }
+    }
+
+    @Test
+    fun `group attachment failure is reported in the durable room transcript`() = runBlocking {
+        MockWebServer().use { server ->
+            server.dispatcher = readyDashboardDispatcher(withProfiles = true)
+            server.start()
+            val context = RuntimeEnvironment.getApplication()
+            val backend = backend(server)
+            val registry = BackendRegistry(context, json)
+            val credentials = InMemoryCredentialStore()
+            val gateway = RecordingGateway(json)
+            registry.save(backend)
+            credentials.put(backend.id, SESSION_COOKIE)
+            val repository = repository(context, registry, credentials, BillingPendingChargeStore(context, json), gateway)
+            awaitReady(repository, backend.id)
+            val members = listOf(
+                com.nousresearch.hermes.protocol.BotGroupMember("coder", "coder", backend.id),
+                com.nousresearch.hermes.protocol.BotGroupMember("reviewer", "reviewer", backend.id),
+            )
+            gateway.enqueue("profiles.list", json.parseToJsonElement("""{"profiles":[{"name":"default"}]}"""))
+            gateway.enqueue("profiles.configure", json.parseToJsonElement("""{"applied":{"ui_meta":true}}"""))
+            members.forEach { member ->
+                gateway.enqueue("profiles.list", json.parseToJsonElement("""{"profiles":[{"name":"${member.name}"}]}"""))
+                gateway.enqueue("profiles.configure", json.parseToJsonElement("""{"applied":{"ui_meta":true}}"""))
+            }
+            repeat(7) {
+                gateway.enqueue("profiles.list", json.parseToJsonElement("""{"profiles":[{"name":"default"}]}"""))
+                gateway.enqueue("profiles.configure", json.parseToJsonElement("""{"applied":{"ui_meta":true}}"""))
+            }
+            val room = repository.createBotGroup("Launch", members)
+            repeat(2) { index ->
+                gateway.enqueue("session.list", json.parseToJsonElement("""{"sessions":[]}"""))
+                gateway.enqueue("session.create", json.parseToJsonElement("""{"session_id":"live-$index","stored_session_id":"stored-$index"}"""))
+                gateway.enqueue("prompt.submit", json.parseToJsonElement("""{"status":"streaming"}"""))
+                gateway.enqueue("session.resume", json.parseToJsonElement("""{"session_id":"live-$index","messages":[{"role":"assistant","text":"pass"}]}"""))
+            }
+            gateway.enqueue("image.attach_bytes", json.parseToJsonElement("""{"attached":false,"path":""}"""))
+            gateway.enqueue("image.attach_bytes", json.parseToJsonElement("""{"attached":true,"path":"/tmp/diagram.png"}"""))
+
+            repository.sendBotGroupMessage(
+                room.roomId,
+                "Review this",
+                attachments = listOf(com.nousresearch.hermes.protocol.BotGroupAttachment("diagram.png", "image/png", "AA==")),
+            )
+
+            assertTrue(repository.state.value.botGroups.rooms.single().log.any {
+                it.from.kind == "system" && it.text == "coder could not receive diagram.png."
+            })
+        }
+    }
+
+    @Test
+    fun `group recreation harvests a late reply without interrupting a still running member`() = runBlocking {
+        MockWebServer().use { server ->
+            server.dispatcher = readyDashboardDispatcher(withProfiles = true)
+            server.start()
+            val context = RuntimeEnvironment.getApplication()
+            val backend = backend(server)
+            val registry = BackendRegistry(context, json)
+            val credentials = InMemoryCredentialStore()
+            val gateway = RecordingGateway(json)
+            registry.save(backend)
+            credentials.put(backend.id, SESSION_COOKIE)
+            val repository = repository(context, registry, credentials, BillingPendingChargeStore(context, json), gateway)
+            awaitReady(repository, backend.id)
+            val members = listOf(
+                com.nousresearch.hermes.protocol.BotGroupMember("coder", "coder", backend.id),
+                com.nousresearch.hermes.protocol.BotGroupMember("reviewer", "reviewer", backend.id),
+            )
+            gateway.enqueue("profiles.list", json.parseToJsonElement("""{"profiles":[{"name":"default"}]}"""))
+            gateway.enqueue("profiles.configure", json.parseToJsonElement("""{"applied":{"ui_meta":true}}"""))
+            members.forEach { member ->
+                gateway.enqueue("profiles.list", json.parseToJsonElement("""{"profiles":[{"name":"${member.name}"}]}"""))
+                gateway.enqueue("profiles.configure", json.parseToJsonElement("""{"applied":{"ui_meta":true}}"""))
+            }
+            repeat(5) {
+                gateway.enqueue("profiles.list", json.parseToJsonElement("""{"profiles":[{"name":"default"}]}"""))
+                gateway.enqueue("profiles.configure", json.parseToJsonElement("""{"applied":{"ui_meta":true}}"""))
+            }
+            var room = repository.createBotGroup("Launch", members)
+            room = repository.updateBotGroup(
+                room.copy(stranded = members.associate { member ->
+                    botGroupMemberKey(member) to com.nousresearch.hermes.protocol.BotGroupStranded(0, "main")
+                }),
+            )
+            gateway.enqueue(
+                "session.list",
+                json.parseToJsonElement("""{"sessions":[{"id":"coder-room","resolved_id":"coder-room"}]}"""),
+            )
+            gateway.enqueue(
+                "session.list",
+                json.parseToJsonElement("""{"sessions":[{"id":"reviewer-room","resolved_id":"reviewer-room"}]}"""),
+            )
+            gateway.enqueue("session.list", json.parseToJsonElement("""{"sessions":[]}"""))
+            gateway.enqueue(
+                "session.resume",
+                json.parseToJsonElement("""{"session_id":"coder-live","session_key":"coder-room","messages":[{"id":"late-1","role":"assistant","text":"Late result"}]}"""),
+            )
+            gateway.enqueue(
+                "session.resume",
+                json.parseToJsonElement("""{"session_id":"reviewer-live","session_key":"reviewer-room","running":true}"""),
+            )
+            gateway.enqueue(
+                "session.create",
+                json.parseToJsonElement("""{"session_id":"coder-new","stored_session_id":"coder-new"}"""),
+            )
+            gateway.enqueue("prompt.submit", json.parseToJsonElement("""{"status":"streaming"}"""))
+            gateway.enqueue(
+                "session.resume",
+                json.parseToJsonElement("""{"session_id":"coder-new","messages":[{"role":"assistant","text":"pass"}]}"""),
+            )
+
+            repository.sendBotGroupMessage(room.roomId, "Any updates?")
+
+            val saved = repository.state.value.botGroups.rooms.single()
+            assertEquals(1, saved.log.count { it.id == "late-1" && it.text == "Late result" })
+            assertFalse(botGroupMemberKey(members[0]) in saved.stranded)
+            assertTrue(botGroupMemberKey(members[1]) in saved.stranded)
+            assertEquals(1, gateway.requests.count { it.method == "prompt.submit" })
         }
     }
 

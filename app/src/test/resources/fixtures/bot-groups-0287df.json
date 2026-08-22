@@ -1,0 +1,53 @@
+{
+  "profiles": [
+    {
+      "name": "default",
+      "ui_meta": {
+        "hermes-bots-groups": {
+          "version": 3,
+          "updatedAt": 1787400000000,
+          "rooms": {
+            "id:room-launch": {
+              "name": "Launch room",
+              "roomId": "room-launch",
+              "revision": 7,
+              "members": [
+                {
+                  "name": "coder",
+                  "handle": "coder-mac-mini",
+                  "connectionId": "mac-mini",
+                  "connectionKind": "gateway",
+                  "connectionLabel": "Mac mini",
+                  "sourceScoped": true
+                },
+                {
+                  "name": "coder",
+                  "handle": "coder-cloud",
+                  "connectionId": "cloud",
+                  "connectionKind": "gateway",
+                  "connectionLabel": "Cloud",
+                  "sourceScoped": true
+                }
+              ],
+              "log": [
+                {
+                  "id": "message-1",
+                  "from": { "kind": "member", "name": "coder", "source": "Cloud" },
+                  "text": "@user choose a release window",
+                  "at": 1787400000000,
+                  "thread": "release"
+                }
+              ]
+            }
+          },
+          "deleted": {
+            "id:old-room": 8
+          }
+        }
+      },
+      "ui_meta_revisions": {
+        "hermes-bots-groups": 9
+      }
+    }
+  ]
+}

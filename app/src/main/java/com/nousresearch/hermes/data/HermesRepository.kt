@@ -25,6 +25,19 @@ import com.nousresearch.hermes.protocol.BillingStateResponse
 import com.nousresearch.hermes.protocol.BillingStepUpVerification
 import com.nousresearch.hermes.protocol.BotSessionPage
 import com.nousresearch.hermes.protocol.BotSessionSummary
+import com.nousresearch.hermes.protocol.BOT_GROUP_META_KEY
+import com.nousresearch.hermes.protocol.BotGroupMember
+import com.nousresearch.hermes.protocol.BotGroupAttachment
+import com.nousresearch.hermes.protocol.BotGroupBlockingRequest
+import com.nousresearch.hermes.protocol.BotGroupQuestion
+import com.nousresearch.hermes.protocol.BotGroupCandidate
+import com.nousresearch.hermes.protocol.BotGroupCandidateResult
+import com.nousresearch.hermes.protocol.BotGroupEntry
+import com.nousresearch.hermes.protocol.BotGroupRoom
+import com.nousresearch.hermes.protocol.BotGroupSpeaker
+import com.nousresearch.hermes.protocol.BotGroupSnapshot
+import com.nousresearch.hermes.protocol.BotGroupUiState
+import com.nousresearch.hermes.protocol.BotGroupStranded
 import com.nousresearch.hermes.protocol.CronJob
 import com.nousresearch.hermes.protocol.CronJobCreatePayload
 import com.nousresearch.hermes.protocol.CronJobUpdates
@@ -118,6 +131,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
@@ -196,6 +210,7 @@ data class HermesState(
     val cronJobs: List<CronJob> = emptyList(),
     val cronRuns: Map<String, List<StoredSession>> = emptyMap(),
     val profiles: List<ProfileInfo> = emptyList(),
+    val botGroups: BotGroupUiState = BotGroupUiState(),
     val activeProfile: String = "default",
     val currentProfile: String = "default",
     val managementLoading: Boolean = false,
@@ -339,6 +354,19 @@ private data class ProviderRefreshSnapshot(
 )
 
 private data class BotProfileKey(val backendId: String, val profile: String)
+private data class BotGroupTurnResult(
+    val text: String? = null,
+    val messageId: String? = null,
+    val strandedBefore: Int? = null,
+    val notice: String? = null,
+    val completed: Boolean = false,
+)
+private data class BotGroupSessionState(val session: BotSessionSummary, val state: SessionResumeResult)
+private data class BotGroupSyncTarget(
+    val backend: BackendConfig,
+    val expectedRevision: Long?,
+    val snapshot: BotGroupSnapshot,
+)
 
 enum class DiagnosticAction(val wireName: String) {
     DOCTOR("doctor"),
@@ -427,6 +455,11 @@ class HermesRepository @Inject constructor(
     private val profileRefreshGeneration = AtomicLong()
     private val canonicalChatMutexes = ConcurrentHashMap<BotProfileKey, Mutex>()
     private val pendingBotCreations = ConcurrentHashMap.newKeySet<BotProfileKey>()
+    private val botGroupMutex = Mutex()
+    private val botGroupRuns = ConcurrentHashMap<String, AtomicLong>()
+    private val botGroupMutationGeneration = AtomicLong()
+    private var botGroupSyncJob: Job? = null
+    private var pendingBotGroupSnapshot: BotGroupSnapshot? = null
     private val sessionListMutationMutex = Mutex()
     private var slashCompletionJob: Job? = null
     private var queueDrainJob: Job? = null
@@ -2259,6 +2292,7 @@ class HermesRepository @Inject constructor(
         val (backend, token) = activeCredentials()
         val credentialGeneration = backendCredentialGeneration.get()
         val refreshGeneration = profileRefreshGeneration.incrementAndGet()
+        val groupGeneration = botGroupMutationGeneration.get()
         if (showLoading) mutableState.value = mutableState.value.copy(managementLoading = true, error = null)
         val result = runCatching {
             val profiles = runCatching {
@@ -2276,13 +2310,55 @@ class HermesRepository @Inject constructor(
                 backendCredentialGeneration.get() != credentialGeneration ||
                 profileRefreshGeneration.get() != refreshGeneration
             ) return@onSuccess
+            val priorGroups = mutableState.value.botGroups
+            val defaultProfile = profiles.profiles.firstOrNull { it.name == "default" }
+            val activeSnapshot = runCatching {
+                check(defaultProfile != null || priorGroups.rooms.isEmpty()) {
+                    "Hermes default profile is unavailable"
+                }
+                profileGroupSnapshot(defaultProfile, json)
+            }
+            val groupError = activeSnapshot.exceptionOrNull()?.let {
+                "Hermes returned malformed Bot group metadata; existing rooms were kept."
+            }
+            val groupRefreshOwned = botGroupMutationGeneration.get() == groupGeneration
             mutableState.value = mutableState.value.copy(
                 profiles = profiles.profiles.sortedWith(compareByDescending<ProfileInfo> { it.isDefault }.thenBy { it.name }),
+                botGroups = if (groupRefreshOwned) {
+                    priorGroups.copy(
+                        rooms = activeSnapshot.getOrNull()?.visibleRooms() ?: priorGroups.rooms,
+                        loading = false,
+                        error = groupError,
+                    )
+                } else {
+                    priorGroups.copy(loading = false)
+                },
                 activeProfile = active.active,
                 currentProfile = active.current,
                 managementLoading = if (showLoading) false else mutableState.value.managementLoading,
                 error = null,
             )
+            if (activeSnapshot.isSuccess && groupRefreshOwned) {
+                val synchronized = runCatching {
+                    mutateBotGroups { snapshot ->
+                        check(botGroupMutationGeneration.get() == groupGeneration) {
+                            "Bot group refresh was superseded"
+                        }
+                        pendingBotGroupSnapshot?.let { mergeBotGroupSnapshots(snapshot, it) } ?: snapshot
+                    }
+                }
+                if (synchronized.isSuccess) {
+                    mutableState.value.botGroups.rooms.forEach { room ->
+                        scope.launch { rehydrateBotGroupBlocking(room.roomId) }
+                    }
+                } else if (botGroupMutationGeneration.get() == groupGeneration) {
+                    mutableState.value = mutableState.value.copy(
+                        botGroups = mutableState.value.botGroups.copy(
+                            error = synchronized.exceptionOrNull()?.message ?: "Bot group sync could not complete; refresh to retry.",
+                        ),
+                    )
+                }
+            }
         }.onFailure { error ->
             if (
                 mutableState.value.backend?.id == backend.id &&
@@ -2305,6 +2381,765 @@ class HermesRepository @Inject constructor(
             ) { "Hermes did not save the Bot visibility change; refresh and try again" }
             refreshProfiles()
         }.onFailure(::fail)
+    }
+
+    suspend fun createBotGroup(name: String, members: List<BotGroupMember>): BotGroupRoom {
+        val created = newBotGroupRoom(name, members, System.currentTimeMillis())
+        mutateBotGroups { snapshot ->
+            val taken = snapshot.visibleRooms().mapTo(mutableSetOf()) { it.name.lowercase() }
+            if (snapshot.rooms["id:${created.roomId}"] != null) return@mutateBotGroups snapshot
+            require(name.trim().lowercase() !in taken) { "A group with that name already exists" }
+            snapshot.upsert(created, System.currentTimeMillis())
+        }
+        syncBotGroupMemberships(null, created)
+        return created
+    }
+
+    suspend fun botGroupCandidates(): BotGroupCandidateResult {
+        val sources = mutableListOf<Pair<BackendConfig, ProfileInfo>>()
+        val unavailable = mutableListOf<String>()
+        for (backend in mutableState.value.savedBackends) {
+            try {
+                withBotGateway(backend.id) { client, source ->
+                    client.request("profiles.list", buildJsonObject { put("include_sessions", false) })
+                        .let { json.decodeFromJsonElement(ProfilesResponse.serializer(), it) }
+                        .profiles.forEach { profile -> sources += source to profile }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Throwable) {
+                unavailable += backend.label
+            }
+        }
+        val repeatedNames = sources.groupingBy { it.second.name.lowercase() }.eachCount()
+        val baseHandles = sources.map { (backend, profile) ->
+            if (repeatedNames[profile.name.lowercase()] == 1) {
+                profile.name
+            } else {
+                "${profile.name}-${backend.label.lowercase().replace(Regex("[^a-z0-9]+"), "-").trim('-').ifBlank { backend.id.take(8) }}"
+            }
+        }
+        val usedHandles = mutableSetOf<String>()
+        val candidates = sources.indices.sortedWith(
+            compareBy<Int> { sources[it].first.id }.thenBy { sources[it].second.name.lowercase() },
+        ).map { index ->
+            val (backend, profile) = sources[index]
+            val base = baseHandles[index].take(128)
+            var handle = base
+            var suffix = 2
+            while (!usedHandles.add(handle.lowercase())) {
+                val ending = "-${suffix++}"
+                handle = base.take(128 - ending.length).trimEnd('-') + ending
+            }
+            BotGroupCandidate(profile, backend.id, backend.label, handle)
+        }.sortedWith(compareBy<BotGroupCandidate> { it.profile.name.lowercase() }.thenBy { it.backendLabel.lowercase() })
+        return BotGroupCandidateResult(candidates, unavailable)
+    }
+
+    suspend fun updateBotGroup(room: BotGroupRoom): BotGroupRoom {
+        require(room.roomId.isNotBlank()) { "Group identity is required" }
+        val prior = mutableState.value.botGroups.rooms.firstOrNull { it.roomId == room.roomId }
+            ?: throw IllegalArgumentException("Unknown Bot group")
+        var saved = room
+        mutateBotGroups { snapshot ->
+            val current = snapshot.visibleRooms().firstOrNull { it.roomId == room.roomId }
+            if (current == null && "id:${room.roomId}" in snapshot.deleted) {
+                throw IllegalStateException("That Bot group was disbanded")
+            }
+            val mergedLog = (current?.log.orEmpty() + room.log).distinctBy { it.id }.sortedBy { it.at }
+            saved = room.copy(
+                log = mergedLog,
+                revision = maxOf(room.revision, current?.revision ?: 0) + 1,
+            )
+            snapshot.upsert(saved, System.currentTimeMillis())
+        }
+        if (
+            prior.name != saved.name ||
+            prior.members.map(::botGroupMemberKey).toSet() != saved.members.map(::botGroupMemberKey).toSet()
+        ) {
+            syncBotGroupMemberships(prior, saved)
+        }
+        return saved
+    }
+
+    suspend fun disbandBotGroup(roomId: String) {
+        botGroupRuns.getOrPut(roomId, ::AtomicLong).incrementAndGet()
+        val removed = mutableState.value.botGroups.rooms.firstOrNull { it.roomId == roomId }
+            ?: throw IllegalArgumentException("Unknown Bot group")
+        val interruptionFailures = interruptBotGroupSessions(removed)
+        mutateBotGroups { snapshot ->
+            val room = snapshot.visibleRooms().firstOrNull { it.roomId == roomId }
+                ?: return@mutateBotGroups snapshot.takeIf { "id:$roomId" in it.deleted }
+                    ?: throw IllegalArgumentException("Unknown Bot group")
+            snapshot.disband(room, room.revision + 1, System.currentTimeMillis())
+        }
+        val groups = mutableState.value.botGroups
+        mutableState.value = mutableState.value.copy(
+            botGroups = groups.copy(
+                blockingRequests = groups.blockingRequests.filterNot { it.roomId == roomId },
+                needsYouRoomIds = groups.needsYouRoomIds - roomId,
+            ),
+        )
+        syncBotGroupMemberships(removed, null)
+        if (interruptionFailures.isNotEmpty()) {
+            mutableState.value = mutableState.value.copy(
+                botGroups = mutableState.value.botGroups.copy(
+                    error = "The group was removed, but ${interruptionFailures.joinToString()} could not be interrupted.",
+                ),
+            )
+        }
+    }
+
+    private suspend fun syncBotGroupMemberships(old: BotGroupRoom?, current: BotGroupRoom?) {
+        val members = (old?.members.orEmpty() + current?.members.orEmpty()).distinctBy(::botGroupMemberKey)
+        val failures = mutableListOf<String>()
+        for (member in members) {
+            try {
+                val retained = current?.members?.any { botGroupMemberKey(it) == botGroupMemberKey(member) } == true
+                configureBotGroupMembership(member, old?.name, current?.name?.takeIf { retained })
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Throwable) {
+                failures += member.handle.ifBlank { member.name }
+            }
+        }
+        if (failures.isNotEmpty()) {
+            mutableState.value = mutableState.value.copy(
+                botGroups = mutableState.value.botGroups.copy(
+                    error = "The room was saved, but membership labels could not sync for ${failures.joinToString()}.",
+                ),
+            )
+        }
+    }
+
+    private suspend fun configureBotGroupMembership(member: BotGroupMember, remove: String?, add: String?) {
+        withBotGateway(member.connectionId.ifBlank { requireNotNull(mutableState.value.backend).id }) { client, _ ->
+            repeat(3) { attempt ->
+                val profiles = client.request("profiles.list", buildJsonObject { put("include_sessions", false) })
+                    .let { json.decodeFromJsonElement(ProfilesResponse.serializer(), it) }
+                val profile = profiles.profiles.firstOrNull { it.name == member.name }
+                    ?: throw IllegalArgumentException("Unknown group member ${member.name}")
+                val groups = profile.botMemberships().filterNot { it == remove }
+                    .let { existing -> add?.let { (existing + it).distinct() } ?: existing }
+                val existingMeta = profile.uiMeta?.get("hermes-bots")?.jsonObject.orEmpty()
+                val response = client.request(
+                    "profiles.configure",
+                    buildJsonObject {
+                        put("name", member.name)
+                        put("ui_meta", buildJsonObject {
+                            put("hermes-bots", buildJsonObject {
+                                existingMeta.forEach(::put)
+                                put("groups", JsonArray(groups.map(::JsonPrimitive)))
+                                groups.firstOrNull()?.let { put("group", it) } ?: put("group", kotlinx.serialization.json.JsonNull)
+                            })
+                        })
+                        put("ui_meta_expected_revisions", buildJsonObject {
+                            put("hermes-bots", profile.uiMetaRevisions["hermes-bots"] ?: 0L)
+                        })
+                    },
+                )
+                if (response.jsonObject["applied"]?.jsonObject?.get("ui_meta")?.jsonPrimitive?.booleanOrNull == true) {
+                    return@withBotGateway
+                }
+                if (attempt == 2) throw IllegalStateException("Hermes rejected the group membership update")
+            }
+        }
+    }
+
+
+    suspend fun sendBotGroupMessage(
+        roomId: String,
+        text: String,
+        thread: String = "main",
+        attachments: List<BotGroupAttachment> = emptyList(),
+    ) {
+        val clean = text.trim()
+        require(clean.isNotEmpty()) { "Message is required" }
+        val generation = botGroupRuns.getOrPut(roomId, ::AtomicLong).incrementAndGet()
+        var room = requireNotNull(mutableState.value.botGroups.rooms.firstOrNull { it.roomId == roomId }) {
+            "Unknown Bot group"
+        }
+        room = updateBotGroup(
+            room.copy(log = room.log + BotGroupEntry(
+                id = UUID.randomUUID().toString(),
+                from = BotGroupSpeaker("user", "You"),
+                text = buildString {
+                    append(clean)
+                    attachments.forEach { attachment ->
+                        val kind = when {
+                            attachment.mimeType == "application/pdf" -> "PDF"
+                            attachment.mimeType.startsWith("image/") -> "image"
+                            else -> "file"
+                        }
+                        append("\n[attached $kind: ${attachment.name}]")
+                    }
+                },
+                at = System.currentTimeMillis(),
+                thread = thread,
+            )),
+        )
+        mutableState.value = mutableState.value.copy(
+            botGroups = mutableState.value.botGroups.copy(runningRoomId = roomId),
+        )
+        var posted = 0
+        try {
+            repeat(BOT_GROUP_MAX_ROUNDS) { round ->
+                for (member in room.members) {
+                    if (botGroupRuns[roomId]?.get() != generation) return
+                    room = harvestBotGroupReply(room, member)
+                }
+                var spoke = 0
+                val strandedMembers = room.stranded.keys
+                val responders = groupResponders(
+                    room.log.filter { it.thread == thread }.takeLastWhile { it.from.kind != "user" }.
+                        joinToString("\n", transform = BotGroupEntry::text).ifBlank { clean },
+                    room.members,
+                ).filterNot { botGroupMemberKey(it) in strandedMembers }.let { members ->
+                    if (members.size < 2) members else members.drop(round % members.size) + members.take(round % members.size)
+                }
+                for (member in responders) {
+                    if (botGroupRuns[roomId]?.get() != generation || posted >= BOT_GROUP_MAX_MESSAGES) return
+                    val turn = runCatching {
+                        runBotGroupMemberTurn(room, member, thread, if (round == 0) attachments else emptyList(), generation)
+                    }
+                        .getOrElse { error ->
+                            if (error is CancellationException) throw error
+                            BotGroupTurnResult(notice = "${member.name} could not reply. You can try again.")
+                    }
+                    if (botGroupRuns[roomId]?.get() != generation) return
+                    room = mutableState.value.botGroups.rooms.firstOrNull { it.roomId == roomId } ?: return
+                    turn.notice?.let { notice ->
+                        room = updateBotGroup(room.withBotGroupNotice(notice, thread))
+                    }
+                    turn.strandedBefore?.let { before ->
+                        if (botGroupMemberKey(member) !in room.stranded) {
+                            room = updateBotGroup(
+                                room.copy(stranded = room.stranded + (botGroupMemberKey(member) to BotGroupStranded(before, thread))),
+                            )
+                        }
+                    }
+                    if (turn.completed) {
+                        room = updateBotGroup(room.copy(stranded = room.stranded - botGroupMemberKey(member)))
+                    }
+                    val reply = turn.text
+                    if (!reply.isNullOrBlank() && !isBotGroupPass(reply)) {
+                        room = updateBotGroup(room.copy(log = room.log + BotGroupEntry(
+                            id = turn.messageId ?: UUID.randomUUID().toString(),
+                            from = BotGroupSpeaker(
+                                kind = "member",
+                                name = member.name,
+                                source = member.connectionLabel,
+                            ),
+                            text = reply,
+                            at = System.currentTimeMillis(),
+                            thread = thread,
+                        )))
+                        if (Regex("@user\\b", RegexOption.IGNORE_CASE).containsMatchIn(reply)) {
+                            mutableState.value = mutableState.value.copy(
+                                botGroups = mutableState.value.botGroups.copy(
+                                    needsYouRoomIds = mutableState.value.botGroups.needsYouRoomIds + roomId,
+                                ),
+                            )
+                        }
+                        posted++
+                        spoke++
+                    }
+                }
+                if (spoke == 0) return
+            }
+        } finally {
+            if (botGroupRuns[roomId]?.get() == generation) {
+                mutableState.value = mutableState.value.copy(
+                    botGroups = mutableState.value.botGroups.copy(runningRoomId = null),
+                )
+            }
+        }
+    }
+
+    fun acknowledgeBotGroup(roomId: String) {
+        if (mutableState.value.botGroups.blockingRequests.any { it.roomId == roomId }) return
+        mutableState.value = mutableState.value.copy(
+            botGroups = mutableState.value.botGroups.copy(
+                needsYouRoomIds = mutableState.value.botGroups.needsYouRoomIds - roomId,
+            ),
+        )
+        scope.launch { rehydrateBotGroupBlocking(roomId) }
+    }
+
+    private suspend fun runBotGroupMemberTurn(
+        room: BotGroupRoom,
+        member: BotGroupMember,
+        thread: String,
+        attachments: List<BotGroupAttachment>,
+        generation: Long,
+    ): BotGroupTurnResult = withBotGateway(member.connectionId.ifBlank { requireNotNull(mutableState.value.backend).id }) { client, _ ->
+        val title = "Group: ${room.roomId}"
+        val existingState = botGroupSessionState(client, room, member)
+        val existing = existingState?.session
+        val resumed = existingState?.state
+        if (resumed != null && (resumed.running || resumed.inflight != null || syncBotGroupBlocking(room.roomId, member, resumed))) {
+            return@withBotGateway BotGroupTurnResult(strandedBefore = resumed.messages.size)
+        }
+        val created = if (resumed == null) {
+            client.request(
+                "session.create",
+                buildJsonObject {
+                    put("profile", member.name)
+                    put("title", title)
+                    put("hidden", true)
+                },
+            ).let { json.decodeFromJsonElement(SessionCreateResult.serializer(), it) }
+        } else null
+        val runtime = resumed?.runtimeSessionId ?: requireNotNull(created).runtimeSessionId
+        val before = resumed?.messages?.size ?: created?.messages?.size ?: 0
+        val threadLog = room.log.filter { it.thread == thread }.takeLast(24)
+        val peerNames = room.members.filter { botGroupMemberKey(it) != botGroupMemberKey(member) }
+            .joinToString { "@${it.handle.ifBlank { it.name }}" }
+        val fileRefs = mutableListOf<String>()
+        val unavailableAttachments = mutableListOf<String>()
+        attachments.forEach { attachment ->
+            try {
+                when {
+                    attachment.mimeType.startsWith("image/") -> client.request(
+                        "image.attach_bytes",
+                        buildJsonObject {
+                            put("session_id", runtime)
+                            put("content_base64", attachment.base64)
+                            put("filename", attachment.name)
+                        },
+                    ).let { result ->
+                        val attached = json.decodeFromJsonElement(ImageAttachResult.serializer(), result)
+                        require(attached.attached && attached.path.isNotBlank()) { "Hermes did not attach the image" }
+                    }
+                    attachment.mimeType == "application/pdf" -> client.request(
+                        "pdf.attach",
+                        buildJsonObject {
+                            put("session_id", runtime)
+                            put("content_base64", attachment.base64)
+                            put("filename", attachment.name)
+                        },
+                    ).let { result ->
+                        val attached = json.decodeFromJsonElement(PdfAttachResult.serializer(), result)
+                        require(
+                            attached.attached && attached.pages.isNotEmpty() &&
+                                attached.pages.size == attached.pagesAttached && attached.pages.all { it.path.isNotBlank() },
+                        ) { "Hermes did not attach the PDF pages" }
+                    }
+                    else -> client.request(
+                        "file.attach",
+                        buildJsonObject {
+                            put("session_id", runtime)
+                            put("name", attachment.name)
+                            put("path", attachment.name)
+                            put("data_url", "data:${attachment.mimeType};base64,${attachment.base64}")
+                        },
+                    ).also { result ->
+                        val attached = json.decodeFromJsonElement(FileAttachResult.serializer(), result)
+                        require(attached.attached && attached.uploaded && attached.refText.isNotBlank()) {
+                            "Hermes did not attach the file"
+                        }
+                        fileRefs += attached.refText
+                    }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Throwable) {
+                unavailableAttachments += attachment.name
+            }
+        }
+        val prompt = buildString {
+            appendLine("[Group chat: \"${room.name}\"] You are @${member.handle.ifBlank { member.name }}, one participant with $peerNames and the user.")
+            appendLine("New room messages (oldest first):")
+            threadLog.forEach { entry ->
+                val source = entry.from.source.takeIf(String::isNotBlank)?.let { " [$it]" }.orEmpty()
+                appendLine("  ${entry.from.name}$source: ${entry.text}")
+            }
+            append("Reply with one conversational message only if you have something new to add. Reply exactly (pass) if not. Mention @user only when human input is needed. Never reveal private 1:1 chats.")
+            if (fileRefs.isNotEmpty()) append("\nAttached file references: ${fileRefs.joinToString()}")
+            if (unavailableAttachments.isNotEmpty()) {
+                append("\nThese attachments were unavailable to you: ${unavailableAttachments.joinToString()}.")
+            }
+        }
+        updateBotGroup(
+            room.copy(stranded = room.stranded + (botGroupMemberKey(member) to BotGroupStranded(before, thread))),
+        )
+        if (botGroupRuns[room.roomId]?.get() != generation) return@withBotGateway BotGroupTurnResult(strandedBefore = before)
+        client.request("prompt.submit", buildJsonObject { put("session_id", runtime); put("text", prompt) })
+        val started = System.currentTimeMillis()
+        var deadline = started + 180_000
+        val hardDeadline = started + 1_200_000
+        while (System.currentTimeMillis() < deadline) {
+            delay(1_000)
+            val state = client.request(
+                "session.resume",
+                buildJsonObject {
+                    put("session_id", existing?.id ?: created?.durableSessionId ?: runtime)
+                    put("profile", member.name)
+                },
+            ).let { json.decodeFromJsonElement(SessionResumeResult.serializer(), it) }
+            val awaitingUser = syncBotGroupBlocking(room.roomId, member, state)
+            if (!state.running && state.inflight == null && !awaitingUser && state.messages.size > before) {
+                val indexed = state.messages.withIndex().lastOrNull { it.value.role == "assistant" }
+                return@withBotGateway BotGroupTurnResult(
+                    text = indexed?.value?.botGroupText(),
+                    messageId = indexed?.let { it.value.id ?: "${state.durableSessionId ?: runtime}:${it.index}" },
+                    notice = unavailableAttachments.takeIf(List<String>::isNotEmpty)?.let {
+                        "${member.name} could not receive ${it.joinToString()}."
+                    },
+                    completed = true,
+                )
+            }
+            if (state.running || state.inflight != null || awaitingUser) {
+                deadline = minOf(hardDeadline, maxOf(deadline, System.currentTimeMillis() + 180_000))
+            }
+        }
+        BotGroupTurnResult(
+            strandedBefore = before,
+            notice = unavailableAttachments.takeIf(List<String>::isNotEmpty)?.let {
+                "${member.name} could not receive ${it.joinToString()}."
+            },
+        )
+    }
+
+    private suspend fun harvestBotGroupReply(room: BotGroupRoom, member: BotGroupMember): BotGroupRoom {
+        val key = botGroupMemberKey(member)
+        val marker = room.stranded[key] ?: return room
+        return try {
+            withBotGateway(member.connectionId.ifBlank { requireNotNull(mutableState.value.backend).id }) { client, _ ->
+                val resumed = botGroupSessionState(client, room, member)
+                val session = resumed?.session
+                    ?: return@withBotGateway updateBotGroup(room.copy(stranded = room.stranded - key))
+                val state = requireNotNull(resumed).state
+                if (state.running || state.inflight != null || syncBotGroupBlocking(room.roomId, member, state)) {
+                    return@withBotGateway room
+                }
+                val indexed = state.messages.withIndex().lastOrNull { it.index >= marker.before && it.value.role == "assistant" }
+                val reply = indexed?.value?.botGroupText().orEmpty()
+                var next = room.copy(stranded = room.stranded - key)
+                if (reply.isNotBlank() && !isBotGroupPass(reply)) {
+                    val messageId = indexed?.value?.id ?: "${state.durableSessionId ?: session.id}:${indexed?.index ?: marker.before}"
+                    if (next.log.none { it.id == messageId }) {
+                        next = next.copy(log = next.log + BotGroupEntry(
+                            id = messageId,
+                            from = BotGroupSpeaker("member", member.name, member.connectionLabel),
+                            text = reply,
+                            at = System.currentTimeMillis(),
+                            thread = marker.thread,
+                        ))
+                    }
+                }
+                updateBotGroup(next).also {
+                    if (Regex("@user\\b", RegexOption.IGNORE_CASE).containsMatchIn(reply)) {
+                        mutableState.value = mutableState.value.copy(
+                            botGroups = mutableState.value.botGroups.copy(
+                                needsYouRoomIds = mutableState.value.botGroups.needsYouRoomIds + room.roomId,
+                            ),
+                        )
+                    }
+                }
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Throwable) {
+            runCatching {
+                updateBotGroup(room.withBotGroupNotice("${member.name}'s late reply is still waiting to reconnect.", marker.thread))
+            }.getOrDefault(room)
+        }
+    }
+
+    private fun BotGroupRoom.withBotGroupNotice(text: String, thread: String = "main") = copy(
+        log = log + BotGroupEntry(
+            id = UUID.randomUUID().toString(),
+            from = BotGroupSpeaker("system", "Hermes"),
+            text = text,
+            at = System.currentTimeMillis(),
+            thread = thread,
+        ),
+    )
+
+    private suspend fun botGroupSessionState(
+        client: HermesGatewayClient,
+        room: BotGroupRoom,
+        member: BotGroupMember,
+    ): BotGroupSessionState? {
+        val session = client.request(
+            "session.list",
+            buildJsonObject {
+                put("profile", member.name)
+                put("title", "Group: ${room.roomId}")
+                put("include_hidden", true)
+                put("limit", 1)
+            },
+        ).let { json.decodeFromJsonElement(BotSessionPage.serializer(), it) }.sessions.firstOrNull() ?: return null
+        val state = client.request(
+            "session.resume",
+            buildJsonObject {
+                put("session_id", session.resolvedId ?: session.id)
+                put("profile", member.name)
+            },
+        ).let { json.decodeFromJsonElement(SessionResumeResult.serializer(), it) }
+        return BotGroupSessionState(session, state)
+    }
+
+    private suspend fun interruptBotGroupSessions(room: BotGroupRoom): List<String> {
+        val failed = mutableListOf<String>()
+        room.members.forEach { member ->
+            try {
+                withBotGateway(member.connectionId.ifBlank { requireNotNull(mutableState.value.backend).id }) { client, _ ->
+                    val running = botGroupSessionState(client, room, member) ?: return@withBotGateway
+                    if (running.state.running || running.state.inflight != null) {
+                        client.request(
+                            "session.interrupt",
+                            buildJsonObject { put("session_id", running.state.runtimeSessionId) },
+                        )
+                    }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Throwable) {
+                failed += member.handle.ifBlank { member.name }
+            }
+        }
+        return failed
+    }
+
+    private suspend fun rehydrateBotGroupBlocking(roomId: String) {
+        val room = mutableState.value.botGroups.rooms.firstOrNull { it.roomId == roomId } ?: return
+        val failed = mutableListOf<String>()
+        room.members.forEach { member ->
+            try {
+                withBotGateway(member.connectionId.ifBlank { requireNotNull(mutableState.value.backend).id }) { client, _ ->
+                    botGroupSessionState(client, room, member)?.state?.let {
+                        syncBotGroupBlocking(roomId, member, it)
+                    }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Throwable) {
+                failed += member.handle.ifBlank { member.name }
+            }
+        }
+        if (failed.isNotEmpty() && mutableState.value.botGroups.rooms.any { it.roomId == roomId }) {
+            mutableState.value = mutableState.value.copy(
+                botGroups = mutableState.value.botGroups.copy(
+                    error = "Could not refresh pending requests for ${failed.joinToString()}; opening the room again retries.",
+                ),
+            )
+        }
+    }
+
+    private fun syncBotGroupBlocking(
+        roomId: String,
+        member: BotGroupMember,
+        state: SessionResumeResult,
+    ): Boolean {
+        val clarify = state.pendingClarify?.takeIf { it.requestId.isNotBlank() }
+        val approval = state.pendingApproval?.takeIf { it.requestId.isNotBlank() }
+        val pending = clarify?.let { request ->
+            BotGroupBlockingRequest(
+                roomId = roomId,
+                member = member,
+                sessionId = state.runtimeSessionId,
+                requestId = request.requestId,
+                kind = "clarify",
+                prompt = request.question,
+                choices = request.choices,
+                questions = request.questions.mapNotNull { question ->
+                    (question.qid ?: question.id)?.takeIf(String::isNotBlank)?.let { id ->
+                        BotGroupQuestion(id, question.question, question.choices, question.multiSelect)
+                    }
+                },
+            )
+        } ?: approval?.let { request ->
+            BotGroupBlockingRequest(
+                roomId = roomId,
+                member = member,
+                sessionId = state.runtimeSessionId,
+                requestId = request.requestId,
+                kind = "approval",
+                prompt = request.description,
+                command = request.command,
+                choices = request.choices.ifEmpty { listOf("once", "deny") },
+            )
+        }
+        val keyMatches: (BotGroupBlockingRequest) -> Boolean = {
+            it.roomId == roomId && botGroupMemberKey(it.member) == botGroupMemberKey(member)
+        }
+        val current = mutableState.value.botGroups
+        val retained = current.blockingRequests.filterNot(keyMatches)
+        mutableState.value = mutableState.value.copy(
+            botGroups = current.copy(
+                blockingRequests = pending?.let { retained + it } ?: retained,
+                needsYouRoomIds = if (pending != null) current.needsYouRoomIds + roomId else current.needsYouRoomIds,
+            ),
+        )
+        return pending != null
+    }
+
+    suspend fun answerBotGroupBlocking(requestId: String, answers: Map<String, List<String>>) {
+        val request = mutableState.value.botGroups.blockingRequests.firstOrNull { it.requestId == requestId }
+            ?: throw IllegalArgumentException("That group request is no longer pending")
+        withBotGateway(request.member.connectionId.ifBlank { requireNotNull(mutableState.value.backend).id }) { client, _ ->
+            if (request.kind == "approval") {
+                client.request(
+                    "approval.respond",
+                    buildJsonObject {
+                        put("session_id", request.sessionId)
+                        put("request_id", request.requestId)
+                        put("choice", answers["choice"]?.firstOrNull().orEmpty().ifBlank { "deny" })
+                    },
+                )
+            } else if (request.questions.isNotEmpty()) {
+                request.questions.forEach { question ->
+                    client.request(
+                        "clarify.respond",
+                        buildJsonObject {
+                            put("request_id", request.requestId)
+                            put("question_id", question.id)
+                            val answer = answers[question.id].orEmpty()
+                            put("answer", if (question.multiSelect) JsonArray(answer.map(::JsonPrimitive)) else JsonPrimitive(answer.firstOrNull().orEmpty()))
+                        },
+                    )
+                }
+            } else {
+                client.request(
+                    "clarify.respond",
+                    buildJsonObject {
+                        put("request_id", request.requestId)
+                        put("answer", answers["answer"]?.firstOrNull().orEmpty())
+                    },
+                )
+            }
+        }
+        val groups = mutableState.value.botGroups
+        val remaining = groups.blockingRequests.filterNot { it.requestId == request.requestId }
+        mutableState.value = mutableState.value.copy(
+            botGroups = groups.copy(
+                blockingRequests = remaining,
+                needsYouRoomIds = if (remaining.none { it.roomId == request.roomId }) {
+                    groups.needsYouRoomIds - request.roomId
+                } else {
+                    groups.needsYouRoomIds
+                },
+            ),
+        )
+    }
+
+    private fun ProtocolMessage.botGroupText(): String = when (val value = content) {
+        is JsonPrimitive -> value.content
+        is JsonArray -> value.joinToString("") { part ->
+            when (part) {
+                is JsonPrimitive -> part.content
+                is JsonObject -> part["text"]?.jsonPrimitive?.content.orEmpty()
+                else -> ""
+            }
+        }
+        else -> text.orEmpty()
+    }.trim()
+
+    private suspend fun mutateBotGroups(transform: (BotGroupSnapshot) -> BotGroupSnapshot) = botGroupMutex.withLock {
+        val active = requireNotNull(mutableState.value.backend)
+        var lastFailure: Throwable? = null
+        repeat(3) { attempt ->
+            var combined = BotGroupSnapshot()
+            val targets = mutableListOf<BotGroupSyncTarget>()
+            val unavailable = mutableListOf<String>()
+            for (backend in mutableState.value.savedBackends.sortedByDescending { it.id == active.id }) {
+                try {
+                    withBotGateway(backend.id) { client, source ->
+                        val profiles = client.request("profiles.list", buildJsonObject { put("include_sessions", false) })
+                            .let { json.decodeFromJsonElement(ProfilesResponse.serializer(), it) }
+                        val profile = profiles.profiles.firstOrNull { it.name == "default" }
+                            ?: throw IllegalStateException("Hermes default profile is unavailable")
+                        val sourceSnapshot = profileGroupSnapshot(profile, json)
+                        combined = mergeBotGroupSnapshots(combined, sourceSnapshot)
+                        targets += BotGroupSyncTarget(source, profile.uiMetaRevisions[BOT_GROUP_META_KEY], sourceSnapshot)
+                    }
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (cause: Throwable) {
+                    if (backend.id == active.id) throw cause
+                    unavailable += backend.label
+                }
+            }
+            val snapshot = transform(combined).boundedForGateway(json)
+            check(targets.any { it.backend.id == active.id }) { "Active Hermes source is unavailable" }
+            var synchronized = true
+            for (target in targets) {
+                if (target.snapshot == snapshot) continue
+                val result = runCatching {
+                    withBotGateway(target.backend.id) { client, _ ->
+                        client.request(
+                            "profiles.configure",
+                            buildJsonObject {
+                                put("name", "default")
+                                put("ui_meta", buildJsonObject { put(BOT_GROUP_META_KEY, snapshot.asUiMeta(json)) })
+                                put("ui_meta_expected_revisions", buildJsonObject {
+                                    put(BOT_GROUP_META_KEY, target.expectedRevision ?: 0L)
+                                })
+                            },
+                        )
+                    }
+                }
+                val applied = runCatching { result.getOrNull()?.jsonObject?.get("applied")?.jsonObject }.getOrNull()
+                val revision = runCatching {
+                    applied?.get("ui_meta_revisions")?.jsonObject?.get(BOT_GROUP_META_KEY)?.jsonPrimitive?.content?.toLongOrNull()
+                }.getOrNull()
+                if (
+                    applied?.get("ui_meta")?.jsonPrimitive?.booleanOrNull != true ||
+                    (target.expectedRevision != null && revision != target.expectedRevision + 1)
+                ) {
+                    synchronized = false
+                    lastFailure = result.exceptionOrNull()
+                    break
+                }
+            }
+            if (synchronized) {
+                val pendingSources = unavailable.takeIf {
+                    snapshot.rooms.isNotEmpty() || snapshot.deleted.isNotEmpty()
+                }.orEmpty()
+                pendingBotGroupSnapshot = if (pendingSources.isNotEmpty()) {
+                    pendingBotGroupSnapshot?.let { mergeBotGroupSnapshots(it, snapshot) } ?: snapshot
+                } else {
+                    null
+                }
+                botGroupMutationGeneration.incrementAndGet()
+                mutableState.value = mutableState.value.copy(
+                    botGroups = mutableState.value.botGroups.copy(
+                        rooms = snapshot.visibleRooms(),
+                        error = pendingSources.takeIf(List<String>::isNotEmpty)?.let {
+                            "Group saved; sync will retry when ${it.joinToString()} reconnects."
+                        },
+                    ),
+                )
+                if (pendingSources.isNotEmpty()) scheduleBotGroupSyncRetry()
+                return@withLock
+            }
+            if (attempt == 2) throw lastFailure
+                ?: IllegalStateException("Hermes rejected the group update after concurrent changes")
+            check(mutableState.value.backend?.id == active.id) { "Backend changed during group update" }
+        }
+    }
+
+    private fun scheduleBotGroupSyncRetry() {
+        if (botGroupSyncJob?.isActive == true) return
+        botGroupSyncJob = scope.launch {
+            for (retryDelay in listOf(5_000L, 15_000L, 30_000L, 60_000L, 120_000L)) {
+                delay(retryDelay)
+                val saved = runCatching {
+                    mutateBotGroups { snapshot ->
+                        pendingBotGroupSnapshot?.let { mergeBotGroupSnapshots(snapshot, it) } ?: snapshot
+                    }
+                }.isSuccess
+                val pending = mutableState.value.botGroups.error?.startsWith("Group saved; sync will retry") == true
+                if (saved && !pending) return@launch
+            }
+            mutableState.value = mutableState.value.copy(
+                botGroups = mutableState.value.botGroups.copy(
+                    error = "Some Bot group sources remain offline. Reconnect or refresh to retry sync.",
+                ),
+            )
+        }
     }
 
     suspend fun describeBotAgent(profileName: String): ProfileDescription {
@@ -5961,6 +6796,7 @@ class HermesRepository @Inject constructor(
                     mutableState.value = mutableState.value.copy(error = null)
                     val active = mutableState.value.activeStoredSession
                     if (active != null) runCatching { openSession(active) }
+                    runCatching { refreshProfiles(showLoading = false) }
                     return@launch
                 }
                 mutableState.value = mutableState.value.copy(

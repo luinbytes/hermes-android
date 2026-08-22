@@ -10,13 +10,21 @@ import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import com.nousresearch.hermes.protocol.StoredSession
 import com.nousresearch.hermes.protocol.ProfileInfo
+import com.nousresearch.hermes.protocol.BotGroupEntry
+import com.nousresearch.hermes.protocol.BotGroupMember
+import com.nousresearch.hermes.protocol.BotGroupRoom
+import com.nousresearch.hermes.protocol.BotGroupSpeaker
+import com.nousresearch.hermes.protocol.BotGroupBlockingRequest
+import com.nousresearch.hermes.protocol.BotGroupQuestion
 import com.nousresearch.hermes.data.BackendConfig
 import com.nousresearch.hermes.data.AuthMode
 import com.nousresearch.hermes.ui.theme.HermesTheme
@@ -96,6 +104,154 @@ class SessionInboxLayoutTest {
                 hasContentDescription("Active", substring = true) and
                 hasContentDescription("Unread", substring = true),
         ).assertExists()
+    }
+
+    @Test
+    fun groupRowExposesSourceQualifiedMembersAndNeedsYouState() {
+        var clicks = 0
+        val room = BotGroupRoom(
+            name = "Launch room",
+            roomId = "room-1",
+            members = listOf(
+                BotGroupMember("coder", "coder-mac", "mac", connectionLabel = "Mac mini"),
+                BotGroupMember("coder", "coder-cloud", "cloud", connectionLabel = "Cloud"),
+            ),
+            log = listOf(BotGroupEntry("entry", BotGroupSpeaker("member", "coder", "Cloud"), "@user approve this", 1)),
+        )
+        compose.setContent {
+            HermesTheme {
+                Surface(Modifier.width(360.dp)) {
+                    BotGroupRow(room, selected = true, running = true, needsYou = true) { clicks++ }
+                }
+            }
+        }
+
+        compose.onNode(
+            hasContentDescription("Launch room", substring = true) and
+                hasContentDescription("coder-mac", substring = true) and
+                hasContentDescription("coder-cloud", substring = true) and
+                hasContentDescription("Needs you", substring = true) and
+                hasContentDescription("Active", substring = true),
+        ).performClick()
+        assertEquals(1, clicks)
+    }
+
+    @Test
+    fun groupConversationStartsAnAttributedThreadAndSendsThroughIt() {
+        var sentText = ""
+        var sentThread = ""
+        val room = BotGroupRoom(
+            name = "Launch room",
+            roomId = "room-1",
+            members = listOf(
+                BotGroupMember("coder", "coder-mac", "mac"),
+                BotGroupMember("reviewer", "reviewer", "mac"),
+            ),
+            log = listOf(BotGroupEntry("answer-1", BotGroupSpeaker("member", "coder", "Mac mini"), "Ready to ship", 1)),
+        )
+        compose.setContent {
+            HermesTheme {
+                BotGroupConversationScreen(
+                    room = room,
+                    running = false,
+                    onSend = { text, thread, _ -> sentText = text; sentThread = thread },
+                    blockingRequests = emptyList(),
+                    onAnswerBlocking = { _, _ -> },
+                    onEdit = {},
+                    onBack = null,
+                )
+            }
+        }
+
+        compose.onNodeWithText("Reply").performClick()
+        compose.onNodeWithText("Replying in thread").assertExists()
+        compose.onNodeWithText("Message Launch room").performTextInput("Looks good")
+        compose.onNodeWithContentDescription("Send").performClick()
+        compose.waitForIdle()
+
+        assertEquals("Looks good", sentText)
+        assertEquals("answer-1", sentThread)
+    }
+
+    @Test
+    fun groupBatchClarificationCollectsEveryAnswerBeforeResponding() {
+        var answers = emptyMap<String, List<String>>()
+        val member = BotGroupMember("coder", "coder-mac", "mac")
+        val room = BotGroupRoom(
+            name = "Launch room",
+            roomId = "room-1",
+            members = listOf(member, BotGroupMember("reviewer", "reviewer", "mac")),
+            log = listOf(BotGroupEntry("entry", BotGroupSpeaker("user", "You"), "Plan launch", 1)),
+        )
+        compose.setContent {
+            HermesTheme {
+                BotGroupConversationScreen(
+                    room = room,
+                    running = true,
+                    blockingRequests = listOf(
+                        BotGroupBlockingRequest(
+                            roomId = room.roomId,
+                            member = member,
+                            sessionId = "live",
+                            requestId = "clarify-1",
+                            kind = "clarify",
+                            prompt = "Launch details",
+                            questions = listOf(
+                                BotGroupQuestion("regions", "Which regions?", listOf("EU", "US"), multiSelect = true),
+                                BotGroupQuestion("owner", "Who owns it?"),
+                            ),
+                        ),
+                    ),
+                    onAnswerBlocking = { _, value -> answers = value },
+                    onSend = { _, _, _ -> },
+                    onEdit = {},
+                    onBack = null,
+                )
+            }
+        }
+
+        compose.onNodeWithText("EU").performClick()
+        compose.onNodeWithText("Who owns it?").assertExists()
+        compose.onAllNodesWithText("Answer")[0].performTextInput("Dana")
+        compose.onNodeWithText("Send answer").performClick()
+        compose.waitForIdle()
+
+        assertEquals(listOf("EU"), answers["regions"])
+        assertEquals(listOf("Dana"), answers["owner"])
+    }
+
+    @Test
+    fun groupDisbandFailureReturnsToSettingsWithAnActionableError() {
+        val room = BotGroupRoom(
+            name = "Launch room",
+            roomId = "room-1",
+            members = listOf(
+                BotGroupMember("coder", "coder", "personal"),
+                BotGroupMember("reviewer", "reviewer", "personal"),
+            ),
+            log = listOf(BotGroupEntry("entry", text = "Group created", at = 1)),
+        )
+        compose.setContent {
+            HermesTheme {
+                BotGroupEditorDialog(
+                    room = room,
+                    candidates = emptyList(),
+                    candidatesLoading = false,
+                    unavailableSources = emptyList(),
+                    onDismiss = {},
+                    onSave = { _, _, _ -> },
+                    onDisband = { error("Network unavailable") },
+                )
+            }
+        }
+
+        compose.onNodeWithText("Disband group").performScrollTo().performClick()
+        compose.waitUntil(5_000) {
+            compose.onAllNodesWithText("Disband", useUnmergedTree = true).fetchSemanticsNodes().isNotEmpty()
+        }
+        compose.onNodeWithText("Disband", useUnmergedTree = true).performClick()
+        compose.waitUntil(5_000) { compose.onAllNodesWithText("Network unavailable").fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithText("Network unavailable").assertExists()
     }
 
     @Test
