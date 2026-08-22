@@ -417,7 +417,7 @@ fun HermesApp(
     onBiometricReentryChange: (Boolean) -> Unit = {},
     skin: HermesSkin = HermesSkin.NOUS,
     onSkinChange: (HermesSkin) -> Unit = {},
-    botModeEnabled: Boolean = false,
+    botModeEnabled: Boolean = true,
     onBotModeEnabledChange: (Boolean) -> Unit = {},
     onWorkspaceReady: () -> Unit = {},
     entryDelivery: HermesEntryDelivery? = null,
