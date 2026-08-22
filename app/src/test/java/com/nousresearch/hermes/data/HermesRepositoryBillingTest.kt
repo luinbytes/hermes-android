@@ -262,6 +262,7 @@ class HermesRepositoryBillingTest {
                 result.candidates.map { it.handle }.sorted(),
             )
             assertEquals(result.candidates.size, result.candidates.map { it.handle.lowercase() }.toSet().size)
+            assertEquals(result.candidates, repository.state.value.botCandidates)
             assertEquals(current.id, repository.state.value.backend?.id)
             assertEquals(listOf(remote.id, remoteTwin.id), scoped.connectedBackendIds)
         }
@@ -728,6 +729,179 @@ class HermesRepositoryBillingTest {
             val lookup = gateway.requests.single { it.method == "session.list" }.params.toString()
             assertTrue(lookup.contains("\"title\":\"Bot Chat\""))
             assertTrue(lookup.contains("\"include_hidden\":true"))
+        }
+    }
+
+    @Test
+    fun `known mentions are delivered to the other bots canonical chat without moving the active chat`() = runBlocking {
+        MockWebServer().use { server ->
+            server.dispatcher = readyDashboardDispatcher(withProfiles = true)
+            server.start()
+            val context = RuntimeEnvironment.getApplication()
+            val backend = backend(server)
+            val registry = BackendRegistry(context, json)
+            val credentials = InMemoryCredentialStore()
+            val gateway = RecordingGateway(json)
+            registry.save(backend)
+            credentials.put(backend.id, SESSION_COOKIE)
+            val repository = repository(context, registry, credentials, BillingPendingChargeStore(context, json), gateway)
+            awaitReady(repository, backend.id)
+            gateway.enqueue(
+                "session.create",
+                json.parseToJsonElement(
+                    """{"session_id":"live-coder","stored_session_id":"coder-chat","messages":[],"info":{"stored_session_id":"coder-chat"}}""",
+                ),
+            )
+            gateway.enqueue("model.options", json.parseToJsonElement("""{"providers":[]}"""))
+            assertTrue(repository.newSession("coder", title = "Bot Chat", hidden = true))
+            gateway.enqueue("prompt.submit", json.parseToJsonElement("""{"status":"streaming"}"""))
+            gateway.enqueue(
+                "profiles.list",
+                json.parseToJsonElement("""{"profiles":[{"name":"coder"},{"name":"reviewer"}]}"""),
+            )
+            gateway.enqueue(
+                "session.list",
+                json.parseToJsonElement(
+                    """{"sessions":[{"id":"wrong-chat","resolved_id":"wrong-tip","title":"Other"},{"id":"reviewer-chat","resolved_id":"reviewer-tip","title":"Bot Chat"}]}""",
+                ),
+            )
+            gateway.enqueue(
+                "session.resume",
+                json.parseToJsonElement(
+                    """{"session_id":"live-reviewer","session_key":"reviewer-tip","messages":[],"info":{"stored_session_id":"reviewer-tip"}}""",
+                ),
+            )
+            gateway.enqueue("prompt.submit", json.parseToJsonElement("""{"status":"streaming"}"""))
+
+            repository.send("Please ask @reviewer to check this; leave @unknown untouched.")
+            withTimeout(5_000) {
+                while (gateway.requests.count { it.method == "prompt.submit" } < 2) delay(10)
+            }
+
+            assertEquals("coder-chat", repository.state.value.activeStoredSession?.durableId)
+            val handoff = gateway.requests.filter { it.method == "prompt.submit" }.last().params.toString()
+            assertTrue(handoff.contains("live-reviewer"))
+            assertTrue(handoff.contains("Message from 🤖 coder (@coder)"))
+            assertTrue(handoff.contains("@unknown untouched"))
+        }
+    }
+
+    @Test
+    fun `bot routine lifecycle stays in its owner profile`() = runBlocking {
+        MockWebServer().use { server ->
+            val base = readyDashboardDispatcher()
+            val cronPaths = mutableListOf<String>()
+            server.dispatcher = object : Dispatcher() {
+                override fun dispatch(request: RecordedRequest): MockResponse {
+                    if (request.requestUrl?.encodedPath?.startsWith("/api/cron/jobs") != true) return base.dispatch(request)
+                    cronPaths += request.path.orEmpty()
+                    val owner = request.requestUrl?.queryParameter("profile") ?: "coder"
+                    val jobId = if (owner == "reviewer") "review" else "daily"
+                    val job = """{"id":"$jobId","enabled":true,"name":"[bot:$owner] Daily"}"""
+                    val body = when {
+                        request.requestUrl?.encodedPath?.endsWith("/runs") == true -> """{"runs":[],"limit":20}"""
+                        request.method == "DELETE" -> """{"ok":true}"""
+                        request.requestUrl?.encodedPath == "/api/cron/jobs" && request.method == "GET" ->
+                            "[$job]"
+                        else -> job
+                    }
+                    return MockResponse().setBody(body)
+                }
+            }
+            server.start()
+            val context = RuntimeEnvironment.getApplication()
+            val backend = backend(server)
+            val registry = BackendRegistry(context, json)
+            val credentials = InMemoryCredentialStore()
+            registry.save(backend)
+            credentials.put(backend.id, SESSION_COOKIE)
+            val repository = repository(
+                context,
+                registry,
+                credentials,
+                BillingPendingChargeStore(context, json),
+                RecordingGateway(json),
+            )
+            awaitReady(repository, backend.id)
+
+            repository.refreshBotRoutines("reviewer")
+            repository.refreshBotRoutines("coder")
+            assertEquals(setOf("coder", "reviewer"), repository.state.value.cronJobs.mapNotNull { it.botRoutineOwner() }.toSet())
+            repository.refreshCronRuns("daily")
+            repository.setCronEnabled("daily", false)
+            repository.triggerCron("daily")
+            assertTrue(
+                runCatching { repository.updateCron("daily", "Daily", "Plan", "0 9 * * *", "") }
+                    .exceptionOrNull() is IllegalArgumentException,
+            )
+            repository.updateCron("daily", "[bot:coder] Daily", "Plan", "0 9 * * *", "")
+            repository.deleteCron("daily")
+
+            assertEquals(
+                listOf(
+                    "/api/cron/jobs?profile=reviewer",
+                    "/api/cron/jobs?profile=coder",
+                    "/api/cron/jobs/daily/runs?limit=20&profile=coder",
+                    "/api/cron/jobs/daily/pause?profile=coder",
+                    "/api/cron/jobs/daily/trigger?profile=coder",
+                    "/api/cron/jobs/daily?profile=coder",
+                    "/api/cron/jobs/daily?profile=coder",
+                ),
+                cronPaths,
+            )
+        }
+    }
+
+    @Test
+    fun `mention creates and explicitly titles a missing canonical bot chat`() = runBlocking {
+        MockWebServer().use { server ->
+            server.dispatcher = readyDashboardDispatcher(withProfiles = true)
+            server.start()
+            val context = RuntimeEnvironment.getApplication()
+            val backend = backend(server)
+            val registry = BackendRegistry(context, json)
+            val credentials = InMemoryCredentialStore()
+            val gateway = RecordingGateway(json)
+            registry.save(backend)
+            credentials.put(backend.id, SESSION_COOKIE)
+            val repository = repository(context, registry, credentials, BillingPendingChargeStore(context, json), gateway)
+            awaitReady(repository, backend.id)
+            gateway.enqueue(
+                "session.create",
+                json.parseToJsonElement(
+                    """{"session_id":"live-coder","stored_session_id":"coder-chat","messages":[],"info":{"stored_session_id":"coder-chat"}}""",
+                ),
+            )
+            gateway.enqueue("model.options", json.parseToJsonElement("""{"providers":[]}"""))
+            assertTrue(repository.newSession("coder", title = "Bot Chat", hidden = true))
+            gateway.enqueue("prompt.submit", json.parseToJsonElement("""{"status":"streaming"}"""))
+            gateway.enqueue(
+                "profiles.list",
+                json.parseToJsonElement("""{"profiles":[{"name":"coder"},{"name":"reviewer"}]}"""),
+            )
+            gateway.enqueue("session.list", json.parseToJsonElement("""{"sessions":[{"id":"other","title":"Other"}]}"""))
+            gateway.enqueue(
+                "session.create",
+                json.parseToJsonElement(
+                    """{"session_id":"live-reviewer","stored_session_id":"reviewer-chat","messages":[],"info":{"stored_session_id":"reviewer-chat"}}""",
+                ),
+            )
+            gateway.enqueueFailure("session.title", HermesRpcException("Method not found", -32601))
+            gateway.enqueue("prompt.submit", json.parseToJsonElement("""{"status":"streaming"}"""))
+
+            repository.send("Please ask @reviewer.")
+            withTimeout(5_000) {
+                while (gateway.requests.count { it.method == "prompt.submit" } < 2) delay(10)
+            }
+
+            val create = gateway.requests.last { it.method == "session.create" }.params.toString()
+            assertTrue(create.contains("\"profile\":\"reviewer\""))
+            assertTrue(create.contains("\"title\":\"Bot Chat\""))
+            assertTrue(create.contains("\"hidden\":true"))
+            val title = gateway.requests.single { it.method == "session.title" }.params.toString()
+            assertTrue(title.contains("live-reviewer"))
+            assertTrue(title.contains("Bot Chat"))
+            assertEquals("coder-chat", repository.state.value.activeStoredSession?.durableId)
         }
     }
 

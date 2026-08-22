@@ -593,18 +593,19 @@ class HermesRestClient(
         ),
     )
 
-    suspend fun cronJobs(config: BackendConfig, token: String): List<CronJob> =
-        get(config, token, "/api/cron/jobs", ListSerializer(CronJob.serializer()))
+    suspend fun cronJobs(config: BackendConfig, token: String, profile: String? = null): List<CronJob> =
+        get(config, token, "/api/cron/jobs${profileQuery(profile)}", ListSerializer(CronJob.serializer()))
 
     suspend fun cronRuns(
         config: BackendConfig,
         token: String,
         jobId: String,
         limit: Int = 20,
+        profile: String? = null,
     ): CronRunPage = get(
         config,
         token,
-        "/api/cron/jobs/${encodePathSegment(jobId)}/runs?limit=${limit.coerceIn(1, 100)}",
+        "/api/cron/jobs/${encodePathSegment(jobId)}/runs?limit=${limit.coerceIn(1, 100)}${profileQuery(profile, '&')}",
         CronRunPage.serializer(),
     )
 
@@ -613,24 +614,25 @@ class HermesRestClient(
         token: String,
         jobId: String,
         enabled: Boolean,
+        profile: String? = null,
     ): CronJob = json.decodeFromJsonElement(
         CronJob.serializer(),
         request(
             config,
             token,
-            "/api/cron/jobs/${encodePathSegment(jobId)}/${if (enabled) "resume" else "pause"}",
+            "/api/cron/jobs/${encodePathSegment(jobId)}/${if (enabled) "resume" else "pause"}${profileQuery(profile)}",
             method = "POST",
             body = buildJsonObject { },
         ),
     )
 
-    suspend fun triggerCron(config: BackendConfig, token: String, jobId: String): CronJob =
+    suspend fun triggerCron(config: BackendConfig, token: String, jobId: String, profile: String? = null): CronJob =
         json.decodeFromJsonElement(
             CronJob.serializer(),
             request(
                 config,
                 token,
-                "/api/cron/jobs/${encodePathSegment(jobId)}/trigger",
+                "/api/cron/jobs/${encodePathSegment(jobId)}/trigger${profileQuery(profile)}",
                 method = "POST",
                 body = buildJsonObject { },
             ),
@@ -640,12 +642,13 @@ class HermesRestClient(
         config: BackendConfig,
         token: String,
         payload: CronJobCreatePayload,
+        profile: String? = null,
     ): CronJob = json.decodeFromJsonElement(
         CronJob.serializer(),
         request(
             config,
             token,
-            "/api/cron/jobs",
+            "/api/cron/jobs${profileQuery(profile)}",
             method = "POST",
             body = json.encodeToJsonElement(CronJobCreatePayload.serializer(), payload),
         ),
@@ -656,12 +659,13 @@ class HermesRestClient(
         token: String,
         jobId: String,
         updates: CronJobUpdates,
+        profile: String? = null,
     ): CronJob = json.decodeFromJsonElement(
         CronJob.serializer(),
         request(
             config,
             token,
-            "/api/cron/jobs/${encodePathSegment(jobId)}",
+            "/api/cron/jobs/${encodePathSegment(jobId)}${profileQuery(profile)}",
             method = "PUT",
             body = buildJsonObject {
                 put("updates", json.encodeToJsonElement(CronJobUpdates.serializer(), updates))
@@ -669,11 +673,11 @@ class HermesRestClient(
         ),
     )
 
-    suspend fun deleteCron(config: BackendConfig, token: String, jobId: String) {
+    suspend fun deleteCron(config: BackendConfig, token: String, jobId: String, profile: String? = null) {
         request(
             config,
             token,
-            "/api/cron/jobs/${encodePathSegment(jobId)}",
+            "/api/cron/jobs/${encodePathSegment(jobId)}${profileQuery(profile)}",
             method = "DELETE",
         )
     }
@@ -1356,6 +1360,9 @@ class HermesRestClient(
     private fun encodePathSegment(value: String): String =
         okhttp3.HttpUrl.Builder().scheme("https").host("placeholder.invalid").addPathSegment(value)
             .build().encodedPath.removePrefix("/")
+
+    private fun profileQuery(profile: String?, prefix: Char = '?'): String =
+        profile?.takeIf(String::isNotBlank)?.let { "$prefix${encodeQueryParameter("profile", it)}" }.orEmpty()
 
     private fun encodeQueryParameter(name: String, value: String): String =
         okhttp3.HttpUrl.Builder().scheme("https").host("placeholder.invalid").addQueryParameter(name, value)

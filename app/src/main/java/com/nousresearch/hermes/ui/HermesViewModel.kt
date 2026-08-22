@@ -378,11 +378,15 @@ class HermesViewModel @Inject constructor(
     fun uninstallSkill(name: String) = viewModelScope.launch { repository.uninstallSkill(name) }
     fun updateSkills() = viewModelScope.launch { repository.updateSkills() }
     fun refreshCron() = viewModelScope.launch { repository.refreshCronJobs() }
+    fun refreshBotRoutines(owner: String) = viewModelScope.launch { repository.refreshBotRoutines(owner) }
     fun refreshCronRuns(jobId: String) = viewModelScope.launch { repository.refreshCronRuns(jobId) }
     fun setCronEnabled(jobId: String, enabled: Boolean) = viewModelScope.launch { repository.setCronEnabled(jobId, enabled) }
     fun triggerCron(jobId: String) = viewModelScope.launch { repository.triggerCron(jobId) }
     fun createCron(name: String, prompt: String, schedule: String, deliver: String) = viewModelScope.launch {
         repository.createCron(name, prompt, schedule, deliver)
+    }
+    fun createBotRoutine(owner: String, name: String, prompt: String, schedule: String, deliver: String) = viewModelScope.launch {
+        repository.createBotRoutine(owner, name, prompt, schedule, deliver)
     }
     fun updateCron(jobId: String, name: String, prompt: String, schedule: String, deliver: String) = viewModelScope.launch {
         repository.updateCron(jobId, name, prompt, schedule, deliver)

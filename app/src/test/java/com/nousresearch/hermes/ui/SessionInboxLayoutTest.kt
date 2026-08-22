@@ -1,8 +1,11 @@
 package com.nousresearch.hermes.ui
 
+import android.Manifest
+import android.app.NotificationManager
 import androidx.compose.foundation.layout.width
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
@@ -18,6 +21,7 @@ import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import com.nousresearch.hermes.protocol.StoredSession
+import com.nousresearch.hermes.protocol.BotSessionSummary
 import com.nousresearch.hermes.protocol.ProfileInfo
 import com.nousresearch.hermes.protocol.BotGroupEntry
 import com.nousresearch.hermes.protocol.BotGroupMember
@@ -27,6 +31,10 @@ import com.nousresearch.hermes.protocol.BotGroupBlockingRequest
 import com.nousresearch.hermes.protocol.BotGroupQuestion
 import com.nousresearch.hermes.data.BackendConfig
 import com.nousresearch.hermes.data.AuthMode
+import com.nousresearch.hermes.data.HermesState
+import com.nousresearch.hermes.protocol.CronJob
+import com.nousresearch.hermes.protocol.CronJobSchedule
+import com.nousresearch.hermes.platform.createHermesNotificationChannels
 import com.nousresearch.hermes.ui.theme.HermesTheme
 import java.time.Instant
 import java.time.ZoneId
@@ -39,7 +47,10 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.RuntimeEnvironment
+import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
+import kotlinx.serialization.json.put
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
@@ -82,7 +93,14 @@ class SessionInboxLayoutTest {
                 Surface(Modifier.width(360.dp)) {
                     BotRow(
                         bot = BotConversation(
-                            profile = ProfileInfo(name = "coder", displayName = "Code Fox", description = "Builds Android apps"),
+                            profile = ProfileInfo(
+                                name = "coder",
+                                displayName = "Code Fox",
+                                description = "Builds Android apps",
+                                uiMeta = kotlinx.serialization.json.buildJsonObject {
+                                    put("hermes-bots", kotlinx.serialization.json.buildJsonObject { put("hidden", true) })
+                                },
+                            ),
                             latestSession = StoredSession(sessionId = "chat", profile = "coder", title = "Fix the release", lastActive = 10.0),
                             selected = true,
                             sourceLabel = "Mac mini",
@@ -90,6 +108,7 @@ class SessionInboxLayoutTest {
                         ),
                         nowMillis = 20_000L,
                         onClick = {},
+                        onToggleHidden = {},
                     )
                 }
             }
@@ -102,8 +121,151 @@ class SessionInboxLayoutTest {
                 hasContentDescription("Builds Android apps", substring = true) and
                 hasContentDescription("Selected", substring = true) and
                 hasContentDescription("Active", substring = true) and
-                hasContentDescription("Unread", substring = true),
+                hasContentDescription("Unread", substring = true) and
+                hasContentDescription("Hidden", substring = true),
         ).assertExists()
+    }
+
+    @Test
+    fun botRoutineDialogKeepsOwnerTagAndStructuredScheduleAtLargeText() {
+        var created = emptyList<String>()
+        compose.setContent {
+            CompositionLocalProvider(LocalDensity provides Density(1f, 1.8f)) {
+                HermesTheme {
+                    Surface(Modifier.width(360.dp)) {
+                        BotRoutinesDialog(
+                            state = HermesState(
+                                cronJobs = listOf(
+                                    CronJob(
+                                        enabled = true,
+                                        id = "daily",
+                                        name = "[bot:coder] Existing brief",
+                                        prompt = "Summarize the day",
+                                        schedule = CronJobSchedule(expr = "0 9 * * *"),
+                                    ),
+                                ),
+                            ),
+                            owner = "coder",
+                            onRefresh = {},
+                            onSetEnabled = { _, _ -> },
+                            onTrigger = {},
+                            onLoadRuns = {},
+                            onOpenRun = {},
+                            onCreate = { name, prompt, schedule, deliver -> created = listOf(name, prompt, schedule, deliver) },
+                            onUpdate = { _, _, _, _, _ -> },
+                            onDelete = {},
+                            onDismiss = {},
+                        )
+                    }
+                }
+            }
+        }
+
+        compose.onNodeWithText("Existing brief").assertExists()
+        compose.onNodeWithText("New routine").performClick()
+        compose.onNodeWithText("Name").performTextInput("Morning plan")
+        compose.onNodeWithText("Hermes prompt").performTextInput("Plan today's work")
+        compose.onNodeWithText("Save").performClick()
+        compose.waitForIdle()
+
+        assertEquals(listOf("[bot:coder] Morning plan", "Plan today's work", "0 9 * * *", ""), created)
+    }
+
+    @Test
+    fun botActivityProducerPostsOnlyAfterVisibleStateChanges() {
+        val context = RuntimeEnvironment.getApplication()
+        val manager = context.getSystemService(NotificationManager::class.java)
+        manager.cancelAll()
+        createHermesNotificationChannels(context)
+        shadowOf(context).grantPermissions(Manifest.permission.POST_NOTIFICATIONS)
+        val backend = BackendConfig("mac", "Mac mini", "https://hermes.test", AuthMode.TOKEN)
+        val initialBot = ProfileInfo(
+            name = "coder",
+            canonicalSession = BotSessionSummary("bot-chat", title = "Bot Chat", lastActive = 1.0),
+        )
+        val room = BotGroupRoom(
+            name = "Launch",
+            roomId = "launch",
+            members = listOf(BotGroupMember("coder", "coder", backend.id, connectionLabel = backend.label)),
+            log = listOf(BotGroupEntry("reply", BotGroupSpeaker("member", "coder", backend.label), "@user approve", 1)),
+        )
+        val observed = mutableStateOf(
+            HermesState(
+                backend = backend,
+                profiles = listOf(initialBot),
+                botGroups = com.nousresearch.hermes.protocol.BotGroupUiState(rooms = listOf(room)),
+                cronJobs = listOf(CronJob(enabled = true, id = "daily", name = "[bot:coder] Daily", lastRunAt = "first")),
+            ),
+        )
+        compose.setContent { BotActivityNotifications(observed.value) }
+        compose.waitForIdle()
+        assertTrue(manager.activeNotifications.isEmpty())
+
+        compose.runOnIdle {
+            observed.value = observed.value.copy(
+                profiles = listOf(initialBot.copy(canonicalSession = initialBot.canonicalSession?.copy(lastActive = 2.0))),
+                botGroups = observed.value.botGroups.copy(needsYouRoomIds = setOf(room.roomId)),
+                cronJobs = listOf(CronJob(enabled = true, id = "daily", name = "[bot:coder] Daily", lastRunAt = "second")),
+            )
+        }
+        compose.waitForIdle()
+        val notificationTitles = manager.activeNotifications.map {
+            it.notification.extras.getString(android.app.Notification.EXTRA_TITLE)
+        }
+        assertEquals(notificationTitles.toString(), 3, manager.activeNotifications.size)
+        manager.cancelAll()
+    }
+
+    @Test
+    fun remoteGroupSpeakerStaysPrivateUntilItsVisibilityIsKnown() {
+        val member = BotGroupMember("reviewer", "reviewer-cloud", "cloud", connectionLabel = "Cloud")
+        val room = BotGroupRoom(
+            name = "Remote",
+            roomId = "remote",
+            members = listOf(member),
+            log = listOf(BotGroupEntry("reply", BotGroupSpeaker("member", "reviewer", "Cloud"), "@user approve", 1)),
+        )
+
+        assertTrue(botGroupSpeakerHidden(room, emptyList(), backendId = "mac"))
+        val remoteBot = com.nousresearch.hermes.protocol.BotGroupCandidate(
+            ProfileInfo(
+                name = "reviewer",
+                uiMeta = kotlinx.serialization.json.buildJsonObject {
+                    put("hermes-bots", kotlinx.serialization.json.buildJsonObject { put("hidden", false) })
+                },
+            ),
+            "cloud",
+            "Cloud",
+            "reviewer-cloud",
+        )
+        assertTrue(
+            botGroupSpeakerHidden(
+                room,
+                emptyList(),
+                backendId = "mac",
+                candidates = listOf(remoteBot.copy(profile = ProfileInfo(name = "reviewer"))),
+            ),
+        )
+        val hiddenRemoteBot = remoteBot.copy(
+            profile = remoteBot.profile.copy(
+                uiMeta = kotlinx.serialization.json.buildJsonObject {
+                    put("hermes-bots", kotlinx.serialization.json.buildJsonObject { put("hidden", true) })
+                },
+            ),
+        )
+        assertTrue(botGroupSpeakerHidden(room, emptyList(), backendId = "mac", candidates = listOf(hiddenRemoteBot)))
+        org.junit.Assert.assertFalse(
+            botGroupSpeakerHidden(room, emptyList(), backendId = "mac", candidates = listOf(remoteBot)),
+        )
+        assertTrue(botGroupSpeakerHidden(room.copy(members = room.members + member), emptyList(), "mac", listOf(remoteBot)))
+        assertTrue(
+            botGroupSpeakerHidden(
+                room.copy(members = listOf(member.copy(connectionId = "", sourceScoped = true))),
+                listOf(BotConversation(ProfileInfo(name = "reviewer"))),
+                "mac",
+                listOf(remoteBot),
+            ),
+        )
     }
 
     @Test
