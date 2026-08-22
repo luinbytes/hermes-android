@@ -1,0 +1,15 @@
+{
+  "sessions": [
+    {
+      "id": "bot-chat-root",
+      "resolved_id": "bot-chat-tip",
+      "root_title": "Bot Chat",
+      "title": "Bot Chat (continued)",
+      "preview": "Welcome back",
+      "started_at": 1777000000,
+      "last_active": 1777000200,
+      "message_count": 12,
+      "source": "android"
+    }
+  ]
+}

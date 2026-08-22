@@ -123,6 +123,11 @@ data class BotSessionSummary(
 )
 
 @Serializable
+data class BotSessionPage(
+    val sessions: List<BotSessionSummary> = emptyList(),
+)
+
+@Serializable
 data class ProfileInfo(
     val description: String = "",
     @SerialName("description_auto") val descriptionAuto: Boolean = false,

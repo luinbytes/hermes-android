@@ -23,6 +23,8 @@ import com.nousresearch.hermes.protocol.BillingChargeStatusResponse
 import com.nousresearch.hermes.protocol.BillingMutationResponse
 import com.nousresearch.hermes.protocol.BillingStateResponse
 import com.nousresearch.hermes.protocol.BillingStepUpVerification
+import com.nousresearch.hermes.protocol.BotSessionPage
+import com.nousresearch.hermes.protocol.BotSessionSummary
 import com.nousresearch.hermes.protocol.CronJob
 import com.nousresearch.hermes.protocol.CronJobCreatePayload
 import com.nousresearch.hermes.protocol.CronJobUpdates
@@ -128,6 +130,15 @@ internal fun botHiddenConfigureParams(profile: ProfileInfo, hidden: Boolean) = b
     put("ui_meta_expected_revisions", buildJsonObject {
         put("hermes-bots", profile.uiMetaRevisions["hermes-bots"] ?: 0L)
     })
+}
+
+internal fun HermesState.isActiveCanonicalBotChat(): Boolean {
+    val active = activeStoredSession ?: return false
+    if (active.rootTitle == BOT_CHAT_TITLE || active.title == BOT_CHAT_TITLE) return true
+    val canonical = profiles.firstOrNull {
+        it.name.normalizedProfile() == active.profile.normalizedProfile()
+    }?.canonicalSession ?: return false
+    return active.durableId == canonical.id || active.durableId == canonical.resolvedId
 }
 
 data class HermesState(
@@ -392,6 +403,7 @@ class HermesRepository @Inject constructor(
     private val sessionListRefreshPriorityMutex = Mutex()
     private val backendCredentialGeneration = AtomicLong()
     private val profileRefreshGeneration = AtomicLong()
+    private val canonicalChatMutexes = ConcurrentHashMap<String, Mutex>()
     private val sessionListMutationMutex = Mutex()
     private var slashCompletionJob: Job? = null
     private var queueDrainJob: Job? = null
@@ -1052,7 +1064,12 @@ class HermesRepository @Inject constructor(
         }
     }
 
-    suspend fun newSession(profile: String? = null, preservePendingAttachments: Boolean = false): Boolean {
+    suspend fun newSession(
+        profile: String? = null,
+        preservePendingAttachments: Boolean = false,
+        title: String? = null,
+        hidden: Boolean = false,
+    ): Boolean {
         if (!preservePendingAttachments) invalidatePendingAttachments()
         val requestGeneration = openSessionGeneration.incrementAndGet()
         val backend = try {
@@ -1072,6 +1089,8 @@ class HermesRepository @Inject constructor(
                     put("cols", 96)
                     put("source", "android")
                     profile?.let { put("profile", it) }
+                    title?.takeIf(String::isNotBlank)?.let { put("title", it) }
+                    if (hidden) put("hidden", true)
                 },
             ).let { json.decodeFromJsonElement(SessionCreateResult.serializer(), it) }
         } catch (cancelled: CancellationException) {
@@ -1105,7 +1124,7 @@ class HermesRepository @Inject constructor(
         val activeProfile = profile ?: current.activeProfile
         val durableId = created.durableSessionId.orEmpty().ifBlank { created.info.storedSessionId }
         val activeSession = durableId.takeIf(String::isNotBlank)?.let {
-            StoredSession(sessionId = it, profile = activeProfile, source = "android")
+            StoredSession(sessionId = it, profile = activeProfile, source = "android", title = title)
         }
         mutableState.value = current.copy(
             activeStoredSession = activeSession,
@@ -1132,6 +1151,105 @@ class HermesRepository @Inject constructor(
         loadComposerState()
         refreshModelOptions()
         return true
+    }
+
+    suspend fun openCanonicalBotChat(profileName: String): Boolean {
+        val profile = profileName.trim()
+        require(profile.isNotEmpty()) { "Hermes profile is required" }
+        val backendId = mutableState.value.backend?.id ?: return false
+        val credentialGeneration = backendCredentialGeneration.get()
+        return canonicalChatMutexes.getOrPut("$backendId::${profile.normalizedProfile()}") { Mutex() }.withLock {
+            if (
+                mutableState.value.backend?.id != backendId ||
+                backendCredentialGeneration.get() != credentialGeneration
+            ) return@withLock false
+            if (
+                mutableState.value.isActiveCanonicalBotChat() &&
+                mutableState.value.activeStoredSession?.profile.normalizedProfile() == profile.normalizedProfile()
+            ) return@withLock true
+
+            val registered = mutableState.value.profiles.firstOrNull {
+                it.name.normalizedProfile() == profile.normalizedProfile()
+            }?.let { it.canonicalSession ?: it.preferredSession }
+
+            val existing = try {
+                gateway.request(
+                    "session.list",
+                    buildJsonObject {
+                        put("profile", profile)
+                        put("title", BOT_CHAT_TITLE)
+                        put("limit", 200)
+                        put("include_hidden", true)
+                    },
+                ).let { json.decodeFromJsonElement(BotSessionPage.serializer(), it) }
+                    .sessions.firstOrNull(BotSessionSummary::isCanonicalBotChat)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                if (
+                    registered != null &&
+                    mutableState.value.backend?.id == backendId &&
+                    backendCredentialGeneration.get() == credentialGeneration
+                ) {
+                    openSession(registered.toStoredSession(profile))
+                    return@withLock mutableState.value.runtimeSessionId != null &&
+                        mutableState.value.backend?.id == backendId &&
+                        mutableState.value.activeStoredSession?.profile.normalizedProfile() == profile.normalizedProfile()
+                }
+                if (
+                    mutableState.value.backend?.id == backendId &&
+                    backendCredentialGeneration.get() == credentialGeneration
+                ) fail(error)
+                return@withLock false
+            }
+            if (
+                mutableState.value.backend?.id != backendId ||
+                backendCredentialGeneration.get() != credentialGeneration
+            ) return@withLock false
+
+            val canonical = existing ?: registered
+            if (canonical != null) {
+                openSession(canonical.toStoredSession(profile))
+                return@withLock mutableState.value.runtimeSessionId != null &&
+                    mutableState.value.backend?.id == backendId &&
+                    mutableState.value.activeStoredSession?.profile.normalizedProfile() == profile.normalizedProfile()
+            }
+
+            if (!newSession(profile, title = BOT_CHAT_TITLE, hidden = true)) return@withLock false
+            if (
+                mutableState.value.backend?.id != backendId ||
+                backendCredentialGeneration.get() != credentialGeneration
+            ) return@withLock false
+            val runtimeId = mutableState.value.runtimeSessionId ?: return@withLock false
+            try {
+                gateway.request(
+                    "session.title",
+                    buildJsonObject {
+                        put("session_id", runtimeId)
+                        put("title", BOT_CHAT_TITLE)
+                    },
+                )
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Throwable) {
+                // Older gateways persist the title with the first prompt.
+            }
+            if (
+                mutableState.value.backend?.id != backendId ||
+                backendCredentialGeneration.get() != credentialGeneration ||
+                mutableState.value.runtimeSessionId != runtimeId
+            ) return@withLock false
+            send(BOT_CHAT_INTRO)
+            mutableState.value.error == null
+        }
+    }
+
+    suspend fun resetActive() {
+        if (mutableState.value.isActiveCanonicalBotChat()) {
+            compressActive()
+        } else {
+            newSession(mutableState.value.activeStoredSession?.profile)
+        }
     }
 
     fun updateDraft(value: String) {
@@ -1329,7 +1447,11 @@ class HermesRepository @Inject constructor(
         when (name) {
             "new", "reset" -> {
                 clearCurrentDraft()
-                newSession(mutableState.value.activeStoredSession?.profile)
+                if (mutableState.value.isActiveCanonicalBotChat()) {
+                    compressActive()
+                } else {
+                    newSession(mutableState.value.activeStoredSession?.profile)
+                }
             }
             "retry" -> {
                 clearCurrentDraft()
@@ -5629,6 +5751,21 @@ private fun sessionTarget(backendId: String, session: StoredSession): SessionTar
         sessionId = session.durableId,
     )
 
+private fun BotSessionSummary.isCanonicalBotChat(): Boolean =
+    rootTitle == BOT_CHAT_TITLE || (rootTitle.isNullOrBlank() && title == BOT_CHAT_TITLE)
+
+private fun BotSessionSummary.toStoredSession(profileName: String) = StoredSession(
+    sessionId = resolvedId ?: id,
+    id = id,
+    title = title,
+    rootTitle = rootTitle,
+    profile = profileName,
+    source = source,
+    messageCount = messageCount,
+    startedAt = startedAt,
+    lastActive = lastActive,
+)
+
 private fun Throwable.isMissingSessionFailure(): Boolean {
     val message = generateSequence(this) { it.cause }
         .joinToString(" ") { it.message.orEmpty() }
@@ -5640,6 +5777,8 @@ private fun Throwable.isMissingSessionFailure(): Boolean {
 }
 
 private const val DIAGNOSTIC_POLL_INTERVAL_MILLIS = 1_000L
+internal const val BOT_CHAT_TITLE = "Bot Chat"
+private const val BOT_CHAT_INTRO = "Hey, tell me about yourself!"
 private const val DIAGNOSTIC_POLL_LIMIT = 120
 private const val DRAFT_SAVE_DEBOUNCE_MILLIS = 300L
 private const val MAX_SHARED_ATTACHMENTS = 5

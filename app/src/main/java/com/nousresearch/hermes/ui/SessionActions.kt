@@ -28,6 +28,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import com.nousresearch.hermes.data.HermesState
+import com.nousresearch.hermes.data.isActiveCanonicalBotChat
 
 private enum class SessionDialog { RENAME, BRANCH, COMPRESS, RETRY, RESET, UNDO, CHECKPOINTS }
 
@@ -50,6 +51,7 @@ internal fun SessionActions(
     var input by remember { mutableStateOf("") }
     val running = state.runtimeInfo.running || state.sending
     val hasHistory = state.timeline.items.isNotEmpty()
+    val canonicalBotChat = state.isActiveCanonicalBotChat()
 
     IconButton(onClick = { menuOpen = true }) { Icon(Icons.Outlined.MoreVert, "Session actions") }
     DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
@@ -110,7 +112,7 @@ internal fun SessionActions(
             },
         )
         DropdownMenuItem(
-            text = { Text("Start fresh session") },
+            text = { Text(if (canonicalBotChat) "Compact Bot Chat" else "Start fresh session") },
             leadingIcon = { Icon(Icons.Outlined.RestartAlt, null) },
             enabled = !running,
             onClick = {
@@ -200,15 +202,23 @@ internal fun SessionActions(
         )
         SessionDialog.RESET -> AlertDialog(
             onDismissRequest = { dialog = null },
-            title = { Text("START FRESH?") },
-            text = { Text("Hermes will end the current live conversation and open a clean session. Its stored transcript remains available in the session list.") },
+            title = { Text(if (canonicalBotChat) "COMPACT BOT CHAT?" else "START FRESH?") },
+            text = {
+                Text(
+                    if (canonicalBotChat) {
+                        "Bot Chats are one continuous conversation. Hermes will compact its working context without creating another session."
+                    } else {
+                        "Hermes will end the current live conversation and open a clean session. Its stored transcript remains available in the session list."
+                    },
+                )
+            },
             confirmButton = {
                 TextButton(
                     onClick = {
                         dialog = null
                         onReset()
                     },
-                ) { Text("Start new session") }
+                ) { Text(if (canonicalBotChat) "Compact chat" else "Start new session") }
             },
             dismissButton = { TextButton(onClick = { dialog = null }) { Text("Cancel") } },
         )

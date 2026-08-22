@@ -342,6 +342,7 @@ data class StoredSession(
     @SerialName("session_id") val sessionId: String = "",
     val id: String? = null,
     val title: String? = null,
+    @SerialName("root_title") val rootTitle: String? = null,
     val profile: String? = null,
     val source: String? = null,
     val model: String? = null,
