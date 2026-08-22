@@ -14,4 +14,7 @@ interface HermesGatewayClient {
     suspend fun connect(config: BackendConfig, cookie: DashboardSessionCredential)
     suspend fun disconnect()
     suspend fun request(method: String, params: JsonElement): JsonElement
+
+    /** An isolated connection for source-scoped Bot Mode operations. */
+    fun fork(): HermesGatewayClient = this
 }

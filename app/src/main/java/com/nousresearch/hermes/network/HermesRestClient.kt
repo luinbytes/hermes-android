@@ -84,6 +84,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 
 class HermesRestClient(
     private val client: OkHttpClient,
@@ -1320,6 +1321,31 @@ class HermesRestClient(
         }
     }
 
+    suspend fun publicImageDataUrl(value: String, maximumBytes: Int = 2_000_000): String = withContext(Dispatchers.IO) {
+        val url = value.toHttpUrlOrNull()
+            ?: throw IOException("Hermes returned an invalid image URL")
+        require(url.isHttps && url.username.isEmpty() && url.password.isEmpty()) {
+            "Hermes returned an unsafe image URL"
+        }
+        val request = Request.Builder().url(url).header("Accept", "image/*").build()
+        val noRedirectClient = client.newBuilder().followRedirects(false).followSslRedirects(false).build()
+        val call = noRedirectClient.newCall(request)
+        val cancellation = currentCoroutineContext()[Job]?.invokeOnCompletion { cause -> if (cause != null) call.cancel() }
+        try {
+            call.execute().use { response ->
+                if (!response.isSuccessful || response.isRedirect) throw IOException("Hermes image download failed (${response.code})")
+                val body = response.body ?: throw IOException("Hermes returned an empty image")
+                val mime = body.contentType()?.toString()?.substringBefore(';').orEmpty()
+                require(mime in setOf("image/png", "image/jpeg", "image/webp")) { "Hermes returned an unsupported image format" }
+                body.contentLength().takeIf { it >= 0 }?.let { require(it <= maximumBytes) { "Hermes image exceeds 2 MB" } }
+                val bytes = readBoundedBytes(body.byteStream(), maximumBytes)
+                "data:$mime;base64,${java.util.Base64.getEncoder().encodeToString(bytes)}"
+            }
+        } finally {
+            cancellation?.dispose()
+        }
+    }
+
     private fun updateStoredSession(config: BackendConfig, sentHeader: String, setCookieHeaders: List<String>) {
         if (config.authMode != AuthMode.DASHBOARD_SESSION || setCookieHeaders.isEmpty()) return
         val current = credentials?.get(config.id) ?: return
@@ -1347,6 +1373,18 @@ class HermesRestClient(
             output.write(buffer, 0, read)
         }
         return output.toString(Charsets.UTF_8.name())
+    }
+
+    private fun readBoundedBytes(input: java.io.InputStream, maximumBytes: Int): ByteArray {
+        val output = ByteArrayOutputStream()
+        val buffer = ByteArray(16 * 1024)
+        while (true) {
+            val read = input.read(buffer)
+            if (read < 0) break
+            require(output.size() + read <= maximumBytes) { "Hermes image exceeds 2 MB" }
+            output.write(buffer, 0, read)
+        }
+        return output.toByteArray()
     }
 
     private companion object {

@@ -5,6 +5,7 @@ import com.nousresearch.hermes.protocol.ProfileInfo
 import com.nousresearch.hermes.protocol.BotSessionSummary
 import com.nousresearch.hermes.protocol.StoredSession
 import androidx.compose.foundation.background
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -26,19 +27,25 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material.icons.outlined.VisibilityOff
+import androidx.compose.material.icons.outlined.Edit
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -161,6 +168,8 @@ internal fun BotRow(
     busyProfile: String? = null,
     onClick: () -> Unit,
     onToggleHidden: (() -> Unit)? = null,
+    onEdit: (() -> Unit)? = null,
+    avatarData: String? = null,
 ) {
     val active = bot.isActive(nowMillis, busyProfile)
     val timestamp = formatSessionTimestamp(bot.activityTimestamp, nowMillis)
@@ -184,6 +193,15 @@ internal fun BotRow(
                     role = Role.Button
                     contentDescription = description
                     onClick { onClick(); true }
+                    customActions = listOfNotNull(
+                        onEdit?.let { edit -> CustomAccessibilityAction("Edit ${bot.name}") { edit(); true } },
+                        onToggleHidden?.let { toggle ->
+                            CustomAccessibilityAction(if (bot.hidden) "Unhide ${bot.name}" else "Hide ${bot.name}") {
+                                toggle()
+                                true
+                            }
+                        },
+                    )
                 }
                 .padding(horizontal = 16.dp, vertical = 11.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -194,10 +212,15 @@ internal fun BotRow(
                 modifier = Modifier.size(48.dp),
             ) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text(
-                        bot.name.firstOrNull(Char::isLetterOrDigit)?.uppercase() ?: "H",
-                        style = MaterialTheme.typography.titleMedium,
-                    )
+                    val avatar = remember(avatarData) { avatarData?.decodeAvatar() }
+                    if (avatar != null) {
+                        Image(avatar, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                    } else {
+                        Text(
+                            bot.name.firstOrNull(Char::isLetterOrDigit)?.uppercase() ?: "H",
+                            style = MaterialTheme.typography.titleMedium,
+                        )
+                    }
                 }
             }
             Spacer(Modifier.width(12.dp))
@@ -239,6 +262,9 @@ internal fun BotRow(
                 Spacer(Modifier.width(8.dp))
                 Box(Modifier.size(8.dp).clip(CircleShape).background(MaterialTheme.colorScheme.tertiary))
             }
+            onEdit?.let { edit ->
+                IconButton(onClick = edit) { Icon(Icons.Outlined.Edit, "Edit ${bot.name}") }
+            }
             onToggleHidden?.let { toggle ->
                 IconButton(onClick = toggle) {
                     Icon(
@@ -251,3 +277,11 @@ internal fun BotRow(
         HorizontalDivider(Modifier.padding(start = 76.dp))
     }
 }
+
+private fun String.decodeAvatar() = runCatching {
+    val encoded = substringAfter(',', missingDelimiterValue = "")
+    require(encoded.isNotEmpty())
+    val bytes = android.util.Base64.decode(encoded, android.util.Base64.DEFAULT)
+    require(bytes.size <= 2_000_000)
+    android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap()
+}.getOrNull()

@@ -10,11 +10,15 @@ import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import com.nousresearch.hermes.protocol.StoredSession
 import com.nousresearch.hermes.protocol.ProfileInfo
+import com.nousresearch.hermes.data.BackendConfig
+import com.nousresearch.hermes.data.AuthMode
 import com.nousresearch.hermes.ui.theme.HermesTheme
 import java.time.Instant
 import java.time.ZoneId
@@ -92,6 +96,70 @@ class SessionInboxLayoutTest {
                 hasContentDescription("Active", substring = true) and
                 hasContentDescription("Unread", substring = true),
         ).assertExists()
+    }
+
+    @Test
+    fun quickAgentCreationTargetsTheSelectedBackendAndReturnsToChat() {
+        var createdBackend = ""
+        var opened = ""
+        compose.setContent {
+            HermesTheme {
+                BotAgentCreateDialog(
+                    profiles = listOf(ProfileInfo(name = "default")),
+                    backends = listOf(
+                        BackendConfig(
+                            id = "personal",
+                            label = "Personal",
+                            baseUrl = "https://hermes.example",
+                            authMode = AuthMode.DASHBOARD_SESSION,
+                        ),
+                    ),
+                    activeBackendId = "personal",
+                    initialClone = null,
+                    onDismiss = {},
+                    onCreate = { draft, backendId, _, _, _, _ ->
+                        createdBackend = "$backendId:${draft.name}"
+                        true
+                    },
+                    onCreated = { name, backendId -> opened = "$backendId:$name" },
+                )
+            }
+        }
+
+        compose.onNodeWithText("Agent handle").performTextInput("helper")
+        compose.onNodeWithText("Create and chat").performClick()
+        compose.waitForIdle()
+
+        assertEquals("personal:helper", createdBackend)
+        assertEquals("personal:helper", opened)
+    }
+
+    @Test
+    fun duplicatedAgentOpensWithAdvancedCloneControls() {
+        compose.setContent {
+            HermesTheme {
+                BotAgentCreateDialog(
+                    profiles = listOf(ProfileInfo(name = "coder")),
+                    backends = listOf(
+                        BackendConfig(
+                            id = "personal",
+                            label = "Personal",
+                            baseUrl = "https://hermes.example",
+                            authMode = AuthMode.DASHBOARD_SESSION,
+                        ),
+                    ),
+                    activeBackendId = "personal",
+                    initialClone = "coder",
+                    onDismiss = {},
+                    onCreate = { _, _, _, _, _, _ -> true },
+                    onCreated = { _, _ -> },
+                )
+            }
+        }
+
+        compose.onNodeWithText("Clone source (optional)").assertExists()
+        compose.onNodeWithText("SOUL.md").assertExists()
+        compose.onNodeWithContentDescription("Clone sessions and full state").assertExists()
     }
 
     @Test

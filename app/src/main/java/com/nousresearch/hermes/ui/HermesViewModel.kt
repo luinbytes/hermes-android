@@ -393,11 +393,23 @@ class HermesViewModel @Inject constructor(
     fun setBotHidden(profile: String, hidden: Boolean) = viewModelScope.launch {
         repository.setBotHidden(profile, hidden)
     }
+    suspend fun describeBotAgent(profile: String) = repository.describeBotAgent(profile)
+    suspend fun createBotAgent(
+        draft: com.nousresearch.hermes.data.BotAgentDraft,
+        backendId: String,
+        cloneFrom: String?,
+        cloneAll: Boolean,
+        noSkills: Boolean,
+        mirrorCredentials: Boolean,
+    ) = repository.createBotAgent(draft, backendId, cloneFrom, cloneAll, noSkills, mirrorCredentials)
+    suspend fun configureBotAgent(draft: com.nousresearch.hermes.data.BotAgentDraft) = repository.configureBotAgent(draft)
+    suspend fun profileAvatar(profile: String) = repository.profileAvatar(profile)
+    suspend fun setProfileAvatar(profile: String, dataUrl: String?) = repository.setProfileAvatar(profile, dataUrl)
+    suspend fun generateProfileAvatar(profile: String, prompt: String) = repository.generateProfileAvatar(profile, prompt)
+    suspend fun profilePetGallery(profile: String) = repository.profilePetGallery(profile)
+    suspend fun adoptProfilePet(profile: String, slug: String) = repository.adoptProfilePet(profile, slug)
     suspend fun entryAuthoritySnapshot(includeCronJobs: Boolean) =
         repository.entryAuthoritySnapshot(includeCronJobs)
-    fun createProfile(name: String, cloneFrom: String, cloneAll: Boolean, noSkills: Boolean) = viewModelScope.launch {
-        repository.createProfile(name, cloneFrom, cloneAll, noSkills)
-    }
     fun renameProfile(name: String, newName: String) = viewModelScope.launch { repository.renameProfile(name, newName) }
     fun setActiveProfile(name: String) = viewModelScope.launch { repository.setActiveProfile(name) }
     fun deleteProfile(name: String) = viewModelScope.launch { repository.deleteProfile(name) }
