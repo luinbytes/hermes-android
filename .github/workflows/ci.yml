@@ -31,13 +31,6 @@ jobs:
       - run: >-
           ./gradlew --no-daemon --no-parallel --max-workers=2
           :app:testDebugUnitTest :app:lintDebug
-      - uses: actions/upload-artifact@v4
-        if: always() && github.event_name == 'workflow_dispatch'
-        with:
-          name: hermes-bot-mode-visual-qa
-          path: app/build/reports/bot-mode-qa/**
-          if-no-files-found: error
-          retention-days: 14
 
   release-plan:
     name: Prepare approval-gated release candidate
@@ -375,7 +368,9 @@ jobs:
         if: always()
         with:
           name: hermes-android-device-test-results
-          path: app/build/outputs/androidTest-results/**
+          path: |
+            app/build/outputs/androidTest-results/**
+            app/build/outputs/managed_device_android_test_additional_output/**
           if-no-files-found: warn
           retention-days: 14
 

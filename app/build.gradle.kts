@@ -321,4 +321,5 @@ dependencies {
     testImplementation(libs.turbine)
     testImplementation(libs.compose.ui.test.junit4)
     androidTestImplementation(libs.compose.ui.test.junit4)
+    androidTestImplementation(libs.androidx.test.uiautomator)
 }
