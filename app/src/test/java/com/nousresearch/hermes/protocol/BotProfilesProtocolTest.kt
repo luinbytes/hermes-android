@@ -11,6 +11,17 @@ class BotProfilesProtocolTest {
     private val json = Json { ignoreUnknownKeys = true }
 
     @Test
+    fun `decodes exact canonical session lookup and compression tip`() {
+        val result = json.decodeFromString<BotSessionPage>(
+            checkNotNull(javaClass.getResource("/fixtures/canonical-session-list-261a4ef.json")).readText(),
+        ).sessions.single()
+
+        assertEquals("bot-chat-root", result.id)
+        assertEquals("bot-chat-tip", result.resolvedId)
+        assertEquals("Bot Chat", result.rootTitle)
+    }
+
+    @Test
     fun `decodes current rich Bot Mode roster`() {
         val result = json.decodeFromString<ProfilesResponse>(
             checkNotNull(javaClass.getResource("/fixtures/bot-profiles-261a4ef.json")).readText(),

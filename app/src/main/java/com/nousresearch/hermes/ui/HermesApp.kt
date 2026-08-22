@@ -213,6 +213,7 @@ import com.nousresearch.hermes.data.AttachmentPhase
 import com.nousresearch.hermes.data.ProfileIdentityDraft
 import com.nousresearch.hermes.data.SlashSuggestion
 import com.nousresearch.hermes.data.normalizedProfile
+import com.nousresearch.hermes.data.isActiveCanonicalBotChat
 import com.nousresearch.hermes.domain.MessageRole
 import com.nousresearch.hermes.domain.ComposerBrowseState
 import com.nousresearch.hermes.domain.ComposerHistory
@@ -286,6 +287,7 @@ private data class ModelActions(
 )
 
 private data class SessionActionCallbacks(
+    val openBotChat: (String, (StoredSession?) -> Unit) -> Unit,
     val rename: (String) -> Unit,
     val branch: (String) -> Unit,
     val retry: () -> Unit,
@@ -426,6 +428,7 @@ fun HermesApp(
     }
     val sessionActions = remember(viewModel) {
         SessionActionCallbacks(
+            openBotChat = viewModel::openBotChat,
             rename = viewModel::renameActive,
             branch = viewModel::branchActive,
             retry = viewModel::retryLastMessage,
@@ -1215,6 +1218,11 @@ private fun HermesWorkspace(
                 )
             }
         }
+        val openBotChat: (BotConversation) -> Unit = { bot ->
+            sessionActions.openBotChat(bot.profile.name) { session ->
+                session?.let(openStoredSession)
+            }
+        }
         fun navigate(destination: WorkspaceContent) {
             onRecovery(null)
             when (destination) {
@@ -1569,7 +1577,7 @@ private fun HermesWorkspace(
                         SessionRail(
                             state, connection, onRefresh, onSearchSessions,
                             onSession = openStoredSession,
-                            onBot = { bot -> bot.latestSession?.let(openStoredSession) ?: createConversation(bot.profile.name) },
+                            onBot = openBotChat,
                             onSetBotHidden = managementActions.setBotHidden,
                             onDeleteSession = onDeleteSession,
                             onArchiveSession = onArchiveSession,
@@ -1614,7 +1622,7 @@ private fun HermesWorkspace(
                     SessionRail(
                         state, connection, onRefresh, onSearchSessions,
                         onSession = openStoredSession,
-                        onBot = { bot -> bot.latestSession?.let(openStoredSession) ?: createConversation(bot.profile.name) },
+                        onBot = openBotChat,
                         onSetBotHidden = managementActions.setBotHidden,
                         onDeleteSession = onDeleteSession,
                         onArchiveSession = onArchiveSession,
@@ -2744,6 +2752,7 @@ private fun ChatSurface(
                 queuedPrompts = state.queuedPrompts,
                 queueDraining = state.queueDraining,
                 queueNotice = state.queueNotice,
+                canonicalBotChat = state.isActiveCanonicalBotChat(),
                 onSend = onSend,
                 onSteer = onSteer,
                 onQueue = queueActions.enqueueDraft,
@@ -3306,6 +3315,7 @@ private fun Composer(
     queuedPrompts: List<QueuedPrompt>,
     queueDraining: Boolean,
     queueNotice: String?,
+    canonicalBotChat: Boolean,
     onSend: (String) -> Unit,
     onSteer: (String) -> Unit,
     onQueue: () -> Unit,
@@ -3702,15 +3712,27 @@ private fun Composer(
     }
     pendingDestructiveSlash?.let { command ->
         val restoresSnapshot = command.lowercase().startsWith("/rollback restore")
+        val compactsBotChat = canonicalBotChat && command.lowercase().substringBefore(' ') in setOf("/new", "/reset")
         AlertDialog(
             onDismissRequest = { pendingDestructiveSlash = null },
-            title = { Text(if (restoresSnapshot) "RESTORE SNAPSHOT?" else "START FRESH?") },
+            title = {
+                Text(
+                    when {
+                        restoresSnapshot -> "RESTORE SNAPSHOT?"
+                        compactsBotChat -> "COMPACT BOT CHAT?"
+                        else -> "START FRESH?"
+                    },
+                )
+            },
             text = {
                 Text(
-                    if (restoresSnapshot) {
-                        "Hermes will replace the current workspace with the selected snapshot. Unsaved workspace changes may be lost."
-                    } else {
-                        "Hermes will end the current live conversation and open a clean session. Its stored transcript remains available in the session list."
+                    when {
+                        restoresSnapshot ->
+                            "Hermes will replace the current workspace with the selected snapshot. Unsaved workspace changes may be lost."
+                        compactsBotChat ->
+                            "Bot Chats are one continuous conversation. Hermes will compact its working context without creating another session."
+                        else ->
+                            "Hermes will end the current live conversation and open a clean session. Its stored transcript remains available in the session list."
                     },
                 )
             },
@@ -3720,7 +3742,15 @@ private fun Composer(
                         pendingDestructiveSlash = null
                         onExecuteSlash(command)
                     },
-                ) { Text(if (restoresSnapshot) "Restore snapshot" else "Start new session") }
+                ) {
+                    Text(
+                        when {
+                            restoresSnapshot -> "Restore snapshot"
+                            compactsBotChat -> "Compact chat"
+                            else -> "Start new session"
+                        },
+                    )
+                }
             },
             dismissButton = { TextButton(onClick = { pendingDestructiveSlash = null }) { Text("Cancel") } },
         )

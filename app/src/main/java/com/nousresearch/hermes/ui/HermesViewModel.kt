@@ -321,6 +321,10 @@ class HermesViewModel @Inject constructor(
     fun refresh() = viewModelScope.launch { repository.refreshSessions() }
     fun searchSessions(query: String) = repository.searchSessions(query)
     fun openSession(session: StoredSession) = viewModelScope.launch { repository.openSession(session) }
+    fun openBotChat(profile: String, onOpened: (StoredSession?) -> Unit) = viewModelScope.launch {
+        val opened = repository.openCanonicalBotChat(profile)
+        onOpened(repository.state.value.activeStoredSession.takeIf { opened })
+    }
     fun newSession(profile: String? = null) = viewModelScope.launch { repository.newSession(profile) }
     suspend fun newSessionFromEntry(profile: String? = null): Boolean = repository.newSession(profile)
     fun send(text: String) = viewModelScope.launch { repository.send(text) }
@@ -363,7 +367,7 @@ class HermesViewModel @Inject constructor(
     fun branchActive(name: String) = viewModelScope.launch { repository.branchActive(name) }
     fun undoLastTurn() = viewModelScope.launch { repository.undoLastTurn() }
     fun retryLastMessage() = viewModelScope.launch { repository.retryLastMessage() }
-    fun resetActive() = viewModelScope.launch { repository.newSession(repository.state.value.activeStoredSession?.profile) }
+    fun resetActive() = viewModelScope.launch { repository.resetActive() }
     fun compressActive(focusTopic: String) = viewModelScope.launch { repository.compressActive(focusTopic) }
     fun refreshSkills() = viewModelScope.launch { repository.refreshSkills() }
     fun toggleSkill(name: String, enabled: Boolean) = viewModelScope.launch { repository.toggleSkill(name, enabled) }

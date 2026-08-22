@@ -53,6 +53,219 @@ class HermesRepositoryBillingTest {
     private val json = Json { ignoreUnknownKeys = true; explicitNulls = false }
 
     @Test
+    fun `canonical bot chat opens the exact compression tip without creating`() = runBlocking {
+        MockWebServer().use { server ->
+            server.dispatcher = readyDashboardDispatcher()
+            server.start()
+            val context = RuntimeEnvironment.getApplication()
+            val backend = backend(server)
+            val registry = BackendRegistry(context, json)
+            val credentials = InMemoryCredentialStore()
+            val gateway = RecordingGateway(json)
+            registry.save(backend)
+            credentials.put(backend.id, SESSION_COOKIE)
+            val repository = repository(context, registry, credentials, BillingPendingChargeStore(context, json), gateway)
+            awaitReady(repository, backend.id)
+            gateway.enqueue(
+                "session.list",
+                checkNotNull(javaClass.getResource("/fixtures/canonical-session-list-261a4ef.json"))
+                    .readText().let(json::parseToJsonElement),
+            )
+            gateway.enqueue(
+                "session.resume",
+                json.parseToJsonElement(
+                    """{"session_id":"live-tip","session_key":"bot-chat-tip","messages":[],"info":{"stored_session_id":"bot-chat-tip"}}""",
+                ),
+            )
+            gateway.enqueue("model.options", json.parseToJsonElement("""{"providers":[]}"""))
+
+            assertTrue(repository.openCanonicalBotChat("coder"))
+
+            assertEquals("bot-chat-tip", repository.state.value.activeStoredSession?.durableId)
+            assertEquals("coder", repository.state.value.activeStoredSession?.profile)
+            assertFalse(gateway.requests.any { it.method == "session.create" })
+            val lookup = gateway.requests.single { it.method == "session.list" }.params.toString()
+            assertTrue(lookup.contains("\"title\":\"Bot Chat\""))
+            assertTrue(lookup.contains("\"include_hidden\":true"))
+        }
+    }
+
+    @Test
+    fun `double tap creates and introduces one hidden canonical bot chat`() = runBlocking {
+        MockWebServer().use { server ->
+            server.dispatcher = readyDashboardDispatcher()
+            server.start()
+            val context = RuntimeEnvironment.getApplication()
+            val backend = backend(server)
+            val registry = BackendRegistry(context, json)
+            val credentials = InMemoryCredentialStore()
+            val gateway = RecordingGateway(json)
+            registry.save(backend)
+            credentials.put(backend.id, SESSION_COOKIE)
+            val repository = repository(context, registry, credentials, BillingPendingChargeStore(context, json), gateway)
+            awaitReady(repository, backend.id)
+            gateway.enqueue("session.list", json.parseToJsonElement("""{"sessions":[]}"""))
+            gateway.enqueue(
+                "session.create",
+                json.parseToJsonElement(
+                    """{"session_id":"live-new","stored_session_id":"bot-chat-new","messages":[],"info":{"stored_session_id":"bot-chat-new"}}""",
+                ),
+            )
+            gateway.enqueue("model.options", json.parseToJsonElement("""{"providers":[]}"""))
+            gateway.enqueueFailure("session.title", IllegalStateException("older gateway"))
+            gateway.enqueue("prompt.submit", json.parseToJsonElement("""{"status":"streaming"}"""))
+
+            val first = launch { assertTrue(repository.openCanonicalBotChat("coder")) }
+            val second = launch { assertTrue(repository.openCanonicalBotChat("coder")) }
+            first.join()
+            second.join()
+
+            assertEquals(1, gateway.requests.count { it.method == "session.create" })
+            val create = gateway.requests.single { it.method == "session.create" }.params.toString()
+            assertTrue(create.contains("\"profile\":\"coder\""))
+            assertTrue(create.contains("\"title\":\"Bot Chat\""))
+            assertTrue(create.contains("\"hidden\":true"))
+            assertEquals(1, gateway.requests.count { it.method == "session.title" })
+            assertEquals(1, gateway.requests.count { it.method == "prompt.submit" })
+            assertTrue(repository.state.value.activeStoredSession?.title == "Bot Chat")
+        }
+    }
+
+    @Test
+    fun `canonical lookup failure never guesses by creating`() = runBlocking {
+        MockWebServer().use { server ->
+            server.dispatcher = readyDashboardDispatcher()
+            server.start()
+            val context = RuntimeEnvironment.getApplication()
+            val backend = backend(server)
+            val registry = BackendRegistry(context, json)
+            val credentials = InMemoryCredentialStore()
+            val gateway = RecordingGateway(json)
+            registry.save(backend)
+            credentials.put(backend.id, SESSION_COOKIE)
+            val repository = repository(context, registry, credentials, BillingPendingChargeStore(context, json), gateway)
+            awaitReady(repository, backend.id)
+            gateway.enqueueFailure("session.list", IOException("lookup disconnected"))
+
+            assertFalse(repository.openCanonicalBotChat("coder"))
+
+            assertFalse(gateway.requests.any { it.method == "session.create" })
+            assertTrue(repository.state.value.error.orEmpty().contains("lookup disconnected"))
+        }
+    }
+
+    @Test
+    fun `canonical lookup failure resumes the registered canonical session`() = runBlocking {
+        MockWebServer().use { server ->
+            server.dispatcher = readyDashboardDispatcher(withProfiles = true)
+            server.start()
+            val context = RuntimeEnvironment.getApplication()
+            val backend = backend(server)
+            val registry = BackendRegistry(context, json)
+            val credentials = InMemoryCredentialStore()
+            val gateway = RecordingGateway(json)
+            registry.save(backend)
+            credentials.put(backend.id, SESSION_COOKIE)
+            val repository = repository(context, registry, credentials, BillingPendingChargeStore(context, json), gateway)
+            awaitReady(repository, backend.id)
+            gateway.enqueue(
+                "profiles.list",
+                json.parseToJsonElement(
+                    """{"profiles":[{"name":"coder","canonical_session":{"id":"registered-root","resolved_id":"registered-tip","root_title":"Bot Chat","title":"Continued"}}]}""",
+                ),
+            )
+            repository.refreshProfiles()
+            gateway.enqueueFailure("session.list", IOException("lookup disconnected"))
+            gateway.enqueue(
+                "session.resume",
+                json.parseToJsonElement(
+                    """{"session_id":"live-registered","session_key":"registered-tip","messages":[],"info":{"stored_session_id":"registered-tip"}}""",
+                ),
+            )
+            gateway.enqueue("model.options", json.parseToJsonElement("""{"providers":[]}"""))
+
+            assertTrue(repository.openCanonicalBotChat("coder"))
+
+            assertEquals("registered-tip", repository.state.value.activeStoredSession?.durableId)
+            assertFalse(gateway.requests.any { it.method == "session.create" })
+        }
+    }
+
+    @Test
+    fun `older session listing still adopts an exact Bot Chat title`() = runBlocking {
+        MockWebServer().use { server ->
+            server.dispatcher = readyDashboardDispatcher()
+            server.start()
+            val context = RuntimeEnvironment.getApplication()
+            val backend = backend(server)
+            val registry = BackendRegistry(context, json)
+            val credentials = InMemoryCredentialStore()
+            val gateway = RecordingGateway(json)
+            registry.save(backend)
+            credentials.put(backend.id, SESSION_COOKIE)
+            val repository = repository(context, registry, credentials, BillingPendingChargeStore(context, json), gateway)
+            awaitReady(repository, backend.id)
+            gateway.enqueue(
+                "session.list",
+                json.parseToJsonElement("""{"sessions":[{"id":"legacy-chat","title":"Bot Chat","message_count":2}]}"""),
+            )
+            gateway.enqueue(
+                "session.resume",
+                json.parseToJsonElement(
+                    """{"session_id":"live-legacy","session_key":"legacy-chat","messages":[],"info":{"stored_session_id":"legacy-chat"}}""",
+                ),
+            )
+            gateway.enqueue("model.options", json.parseToJsonElement("""{"providers":[]}"""))
+
+            assertTrue(repository.openCanonicalBotChat("coder"))
+
+            assertEquals("legacy-chat", repository.state.value.activeStoredSession?.durableId)
+            assertFalse(gateway.requests.any { it.method == "session.create" })
+        }
+    }
+
+    @Test
+    fun `new slash compacts an open canonical bot chat instead of forking it`() = runBlocking {
+        MockWebServer().use { server ->
+            server.dispatcher = readyDashboardDispatcher()
+            server.start()
+            val context = RuntimeEnvironment.getApplication()
+            val backend = backend(server)
+            val registry = BackendRegistry(context, json)
+            val credentials = InMemoryCredentialStore()
+            val gateway = RecordingGateway(json)
+            registry.save(backend)
+            credentials.put(backend.id, SESSION_COOKIE)
+            val repository = repository(context, registry, credentials, BillingPendingChargeStore(context, json), gateway)
+            awaitReady(repository, backend.id)
+            gateway.enqueue(
+                "session.list",
+                checkNotNull(javaClass.getResource("/fixtures/canonical-session-list-261a4ef.json"))
+                    .readText().let(json::parseToJsonElement),
+            )
+            gateway.enqueue(
+                "session.resume",
+                json.parseToJsonElement(
+                    """{"session_id":"live-tip","session_key":"bot-chat-tip","messages":[],"info":{"stored_session_id":"bot-chat-tip"}}""",
+                ),
+            )
+            gateway.enqueue("model.options", json.parseToJsonElement("""{"providers":[]}"""))
+            assertTrue(repository.openCanonicalBotChat("coder"))
+            gateway.enqueue(
+                "commands.catalog",
+                json.parseToJsonElement("""{"pairs":[["new","New session"],["reset","Reset session"]]}"""),
+            )
+            gateway.enqueue("session.compress", json.parseToJsonElement("""{"status":"compressed","removed":4}"""))
+
+            repository.executeSlash("/new")
+
+            assertEquals(1, gateway.requests.count { it.method == "session.compress" })
+            assertFalse(gateway.requests.any { it.method == "session.create" })
+            assertEquals("bot-chat-tip", repository.state.value.activeStoredSession?.durableId)
+        }
+    }
+
+    @Test
     fun `system shared text opens a draft and never submits it`() = runBlocking {
         MockWebServer().use { server ->
             server.dispatcher = readyDashboardDispatcher()
@@ -1627,10 +1840,12 @@ class HermesRepositoryBillingTest {
         javaClass.getResource("/fixtures/billing-state-5988fe6.json"),
     ).readText().let(json::parseToJsonElement)
 
-    private fun readyDashboardDispatcher() = object : Dispatcher() {
+    private fun readyDashboardDispatcher(withProfiles: Boolean = false) = object : Dispatcher() {
         override fun dispatch(request: RecordedRequest): MockResponse = when (request.requestUrl?.encodedPath) {
             "/api/status" -> MockResponse().setBody("""{"status":"ready","hermes_version":"0.18.2"}""")
             "/api/profiles/sessions" -> MockResponse().setBody("""{"sessions":[]}""")
+            "/api/profiles" -> if (withProfiles) MockResponse().setBody("""{"profiles":[]}""") else MockResponse().setResponseCode(404)
+            "/api/profiles/active" -> if (withProfiles) MockResponse().setBody("""{"active":"default","current":"default"}""") else MockResponse().setResponseCode(404)
             else -> MockResponse().setResponseCode(404)
         }
     }
