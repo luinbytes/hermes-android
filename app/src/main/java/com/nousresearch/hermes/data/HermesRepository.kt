@@ -211,6 +211,7 @@ data class HermesState(
     val cronRuns: Map<String, List<StoredSession>> = emptyMap(),
     val profiles: List<ProfileInfo> = emptyList(),
     val botGroups: BotGroupUiState = BotGroupUiState(),
+    val botCandidates: List<BotGroupCandidate> = emptyList(),
     val activeProfile: String = "default",
     val currentProfile: String = "default",
     val managementLoading: Boolean = false,
@@ -1705,6 +1706,8 @@ class HermesRepository @Inject constructor(
             newSession()
             requireNotNull(mutableState.value.runtimeSessionId)
         }
+        val senderBackendId = mutableState.value.backend?.id.orEmpty()
+        val senderProfile = mutableState.value.activeStoredSession?.profile ?: mutableState.value.activeProfile
         val attachmentRefs = mutableState.value.pendingAttachments.mapNotNull { it.refText }
         val submittedText = buildString {
             append(cleaned)
@@ -1729,7 +1732,99 @@ class HermesRepository @Inject constructor(
             if (mutableState.value.draft == submittedDraft) {
                 clearDraft(listOfNotNull(draftContextBeforeSend, currentDraftContext()).distinct())
             }
+            if (Regex("(^|\\s)@[a-z0-9]", RegexOption.IGNORE_CASE).containsMatchIn(cleaned)) {
+                scope.launch { dispatchBotMentions(cleaned, senderProfile, senderBackendId) }
+            }
         }.onFailure(::fail)
+    }
+
+    private suspend fun dispatchBotMentions(text: String, senderProfile: String, senderBackendId: String) {
+        val result = try {
+            botGroupCandidates()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Throwable) {
+            mutableState.update { it.copy(error = "Message sent, but Bot mentions could not be resolved: ${DiagnosticRedactor.redact(error.message.orEmpty())}") }
+            return
+        }
+        val candidates = result.candidates.map { BotMention(it.profile.name, it.backendId, it.handle) }
+        val senderHandle = candidates.firstOrNull {
+            it.backendId == senderBackendId && it.profile.equals(senderProfile, ignoreCase = true)
+        }?.handle ?: senderProfile
+        val mentions = resolveBotMentions(
+            text,
+            candidates,
+            senderProfile,
+            senderBackendId,
+        )
+        val failures = mentions.mapNotNull { target ->
+            try {
+                deliverBotMention(target, senderProfile, senderHandle, text)
+                null
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Throwable) {
+                "@${target.handle}"
+            }
+        }
+        if (failures.isNotEmpty()) {
+            mutableState.update { it.copy(error = "Message sent here, but ${failures.joinToString()} could not be reached.") }
+        }
+    }
+
+    private suspend fun deliverBotMention(target: BotMention, senderProfile: String, senderHandle: String, text: String) {
+        withBotGateway(target.backendId) { client, _ ->
+            val existing = client.request(
+                "session.list",
+                buildJsonObject {
+                    put("profile", target.profile)
+                    put("title", BOT_CHAT_TITLE)
+                    put("include_hidden", true)
+                    put("limit", 200)
+                },
+            ).let { json.decodeFromJsonElement(BotSessionPage.serializer(), it) }
+                .sessions.firstOrNull(BotSessionSummary::isCanonicalBotChat)
+            val runtime = if (existing != null) {
+                client.request(
+                    "session.resume",
+                    buildJsonObject {
+                        put("session_id", existing.resolvedId ?: existing.id)
+                        put("profile", target.profile)
+                    },
+                ).let { json.decodeFromJsonElement(SessionResumeResult.serializer(), it) }.runtimeSessionId
+            } else {
+                val created = client.request(
+                    "session.create",
+                    buildJsonObject {
+                        put("profile", target.profile)
+                        put("title", BOT_CHAT_TITLE)
+                        put("hidden", true)
+                    },
+                ).let { json.decodeFromJsonElement(SessionCreateResult.serializer(), it) }
+                created.runtimeSessionId.also { runtimeId ->
+                    try {
+                        client.request(
+                            "session.title",
+                            buildJsonObject {
+                                put("session_id", runtimeId)
+                                put("title", BOT_CHAT_TITLE)
+                            },
+                        )
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (error: HermesRpcException) {
+                        if (error.rpcCode != -32601) throw error
+                    }
+                }
+            }
+            client.request(
+                "prompt.submit",
+                buildJsonObject {
+                    put("session_id", runtime)
+                    put("text", "Message from 🤖 $senderProfile (@$senderHandle): $text")
+                },
+            )
+        }
     }
 
     suspend fun steer(text: String) {
@@ -2199,19 +2294,32 @@ class HermesRepository @Inject constructor(
     }
 
     suspend fun refreshCronJobs() {
+        refreshCronJobs(null)
+    }
+
+    suspend fun refreshBotRoutines(owner: String) {
+        refreshCronJobs(owner)
+    }
+
+    private suspend fun refreshCronJobs(profile: String?) {
         val (backend, token) = activeCredentials()
         mutableState.value = mutableState.value.copy(managementLoading = true, error = null)
-        runCatching { restClient.cronJobs(backend, token) }
+        runCatching { restClient.cronJobs(backend, token, profile) }
             .onSuccess { jobs ->
-                mutableState.value = mutableState.value.copy(cronJobs = jobs, managementLoading = false)
+                val merged = if (profile == null) jobs else {
+                    mutableState.value.cronJobs.filterNot { it.botRoutineOwner() == profile.lowercase() } +
+                        jobs.filter { it.botRoutineOwner() == profile.lowercase() }
+                }
+                mutableState.value = mutableState.value.copy(cronJobs = merged, managementLoading = false)
             }
             .onFailure(::fail)
     }
 
     suspend fun refreshCronRuns(jobId: String) {
         val (backend, token) = activeCredentials()
+        val profile = botRoutineProfile(jobId)
         mutableState.value = mutableState.value.copy(managementLoading = true, error = null)
-        runCatching { restClient.cronRuns(backend, token, jobId).runs }
+        runCatching { restClient.cronRuns(backend, token, jobId, profile = profile).runs }
             .onSuccess { runs ->
                 mutableState.value = mutableState.value.copy(
                     cronRuns = mutableState.value.cronRuns + (jobId to runs),
@@ -2224,19 +2332,30 @@ class HermesRepository @Inject constructor(
 
     suspend fun setCronEnabled(jobId: String, enabled: Boolean) {
         val (backend, token) = activeCredentials()
-        runCatching { restClient.setCronEnabled(backend, token, jobId, enabled) }
+        runCatching { restClient.setCronEnabled(backend, token, jobId, enabled, botRoutineProfile(jobId)) }
             .onSuccess(::replaceCronJob)
             .onFailure(::fail)
     }
 
     suspend fun triggerCron(jobId: String) {
         val (backend, token) = activeCredentials()
-        runCatching { restClient.triggerCron(backend, token, jobId) }
+        runCatching { restClient.triggerCron(backend, token, jobId, botRoutineProfile(jobId)) }
             .onSuccess(::replaceCronJob)
             .onFailure(::fail)
     }
 
     suspend fun createCron(name: String, prompt: String, schedule: String, deliver: String) {
+        createCronForProfile(null, name, prompt, schedule, deliver)
+    }
+
+    suspend fun createBotRoutine(owner: String, name: String, prompt: String, schedule: String, deliver: String) {
+        require(name.let { BOT_ROUTINE_NAME.matches(it) } && name.startsWith("[bot:${owner.lowercase()}]", ignoreCase = true)) {
+            "Bot routine name must match its owner"
+        }
+        createCronForProfile(owner, name, prompt, schedule, deliver)
+    }
+
+    private suspend fun createCronForProfile(profile: String?, name: String, prompt: String, schedule: String, deliver: String) {
         val cleanPrompt = prompt.trim()
         val cleanSchedule = schedule.trim()
         require(cleanPrompt.isNotEmpty() && cleanSchedule.isNotEmpty()) { "Cron prompt and schedule are required" }
@@ -2251,6 +2370,7 @@ class HermesRepository @Inject constructor(
                     schedule = cleanSchedule,
                     deliver = deliver.trim().takeIf(String::isNotEmpty),
                 ),
+                profile,
             )
         }.onSuccess(::replaceCronJob).onFailure(::fail)
     }
@@ -2260,6 +2380,10 @@ class HermesRepository @Inject constructor(
         val cleanSchedule = schedule.trim()
         require(cleanPrompt.isNotEmpty() && cleanSchedule.isNotEmpty()) { "Cron prompt and schedule are required" }
         val (backend, token) = activeCredentials()
+        val owner = botRoutineProfile(jobId)
+        if (owner != null) require(name.startsWith("[bot:$owner]", ignoreCase = true) && BOT_ROUTINE_NAME.matches(name)) {
+            "Bot routine name must match its owner"
+        }
         runCatching {
             restClient.updateCron(
                 backend,
@@ -2271,13 +2395,14 @@ class HermesRepository @Inject constructor(
                     schedule = cleanSchedule,
                     deliver = deliver.trim(),
                 ),
+                owner,
             )
         }.onSuccess(::replaceCronJob).onFailure(::fail)
     }
 
     suspend fun deleteCron(jobId: String) {
         val (backend, token) = activeCredentials()
-        runCatching { restClient.deleteCron(backend, token, jobId) }
+        runCatching { restClient.deleteCron(backend, token, jobId, botRoutineProfile(jobId)) }
             .onSuccess {
                 mutableState.value = mutableState.value.copy(
                     cronJobs = mutableState.value.cronJobs.filterNot { it.id == jobId },
@@ -2287,6 +2412,9 @@ class HermesRepository @Inject constructor(
             }
             .onFailure(::fail)
     }
+
+    private fun botRoutineProfile(jobId: String): String? =
+        mutableState.value.cronJobs.firstOrNull { it.id == jobId }?.botRoutineOwner()
 
     suspend fun refreshProfiles(showLoading: Boolean = true) {
         val (backend, token) = activeCredentials()
@@ -2411,12 +2539,14 @@ class HermesRepository @Inject constructor(
                 unavailable += backend.label
             }
         }
-        val repeatedNames = sources.groupingBy { it.second.name.lowercase() }.eachCount()
+        val baseNames = sources.map { botMentionBaseHandle(it.second) }
+        val repeatedNames = baseNames.groupingBy(String::lowercase).eachCount()
         val baseHandles = sources.map { (backend, profile) ->
-            if (repeatedNames[profile.name.lowercase()] == 1) {
-                profile.name
+            val baseName = botMentionBaseHandle(profile)
+            if (repeatedNames[baseName.lowercase()] == 1) {
+                baseName
             } else {
-                "${profile.name}-${backend.label.lowercase().replace(Regex("[^a-z0-9]+"), "-").trim('-').ifBlank { backend.id.take(8) }}"
+                "$baseName-${backend.label.lowercase().replace(Regex("[^a-z0-9]+"), "-").trim('-').ifBlank { backend.id.take(8) }}"
             }
         }
         val usedHandles = mutableSetOf<String>()
@@ -2433,6 +2563,7 @@ class HermesRepository @Inject constructor(
             }
             BotGroupCandidate(profile, backend.id, backend.label, handle)
         }.sortedWith(compareBy<BotGroupCandidate> { it.profile.name.lowercase() }.thenBy { it.backendLabel.lowercase() })
+        mutableState.value = mutableState.value.copy(botCandidates = candidates)
         return BotGroupCandidateResult(candidates, unavailable)
     }
 

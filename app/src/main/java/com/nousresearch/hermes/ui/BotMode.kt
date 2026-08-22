@@ -39,6 +39,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -47,6 +48,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
@@ -65,6 +67,7 @@ import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material.icons.outlined.VisibilityOff
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.Group
+import androidx.compose.material.icons.outlined.Schedule
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.AttachFile
 import com.nousresearch.hermes.protocol.BotGroupEntry
@@ -74,6 +77,13 @@ import com.nousresearch.hermes.protocol.BotGroupQuestion
 import com.nousresearch.hermes.protocol.BotGroupCandidate
 import com.nousresearch.hermes.protocol.BotGroupMember
 import com.nousresearch.hermes.protocol.BotGroupRoom
+import com.nousresearch.hermes.data.HermesState
+import com.nousresearch.hermes.data.botRoutineOwner
+import com.nousresearch.hermes.data.shouldNotifyBotEvent
+import com.nousresearch.hermes.platform.HermesNotificationKind
+import com.nousresearch.hermes.platform.postHermesNotification
+import com.nousresearch.hermes.ui.navigation.AutomationDestination
+import com.nousresearch.hermes.ui.navigation.HermesDestinationRoute
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.booleanOrNull
@@ -88,9 +98,7 @@ internal data class BotConversation(
     val unread: Boolean = false,
 ) {
     val hidden: Boolean
-        get() = runCatching {
-            profile.uiMeta?.get("hermes-bots")?.jsonObject?.get("hidden")?.jsonPrimitive?.booleanOrNull == true
-        }.getOrDefault(false)
+        get() = profile.botHidden()
 
     val name: String
         get() = profile.displayName.ifBlank {
@@ -131,6 +139,102 @@ internal data class BotConversation(
 }
 
 internal enum class ChatInboxMode { BOTS, SESSIONS }
+
+internal fun ProfileInfo.botHiddenOrNull(): Boolean? = runCatching {
+    uiMeta?.get("hermes-bots")?.jsonObject?.get("hidden")?.jsonPrimitive?.booleanOrNull
+}.getOrNull()
+
+internal fun ProfileInfo.botHidden(): Boolean = botHiddenOrNull() == true
+
+internal fun botGroupSpeakerHidden(
+    room: BotGroupRoom,
+    bots: List<BotConversation>,
+    backendId: String,
+    candidates: List<BotGroupCandidate> = emptyList(),
+): Boolean {
+    val speaker = room.log.lastOrNull()?.from ?: return true
+    val members = room.members.filter {
+        it.name.equals(speaker.name, ignoreCase = true) &&
+            (speaker.source.isBlank() || it.connectionLabel.equals(speaker.source, ignoreCase = true))
+    }
+    if (members.size != 1) return true
+    val member = members.single()
+    if (
+        member.connectionId.isBlank() &&
+        (member.sourceScoped || speaker.source.isNotBlank() || member.connectionLabel.isNotBlank())
+    ) return true
+    if (member.connectionId.isNotBlank() && member.connectionId != backendId) {
+        val sourceBots = candidates.filter {
+            it.backendId == member.connectionId && it.profile.name.equals(member.name, ignoreCase = true)
+        }
+        return sourceBots.size != 1 || sourceBots.single().profile.botHiddenOrNull() != false
+    }
+    val localBots = bots.filter { it.profile.name.equals(member.name, ignoreCase = true) }
+    return localBots.size != 1 || localBots.single().hidden
+}
+
+@Composable
+internal fun BotActivityNotifications(state: HermesState) {
+    val backendId = state.backend?.id ?: return
+    val context = LocalContext.current
+    val bots = botConversations(state.profiles, state.sessions, state.activeStoredSession)
+    var activity by remember(backendId) { mutableStateOf(bots.associate { it.profile.name to it.activityTimestamp }) }
+    var needsYou by remember(backendId) { mutableStateOf(state.botGroups.needsYouRoomIds) }
+    var routineRuns by remember(backendId) { mutableStateOf(state.cronJobs.associate { it.id to it.lastRunAt }) }
+    SideEffect {
+        val previous = activity
+        val openProfile = state.activeStoredSession?.profile.normalizedProfile()
+        bots.forEach { bot ->
+            if (shouldNotifyBotEvent(
+                    hidden = bot.hidden,
+                    initialized = bot.profile.name in previous,
+                    changed = bot.activityTimestamp > (previous[bot.profile.name] ?: bot.activityTimestamp),
+                    open = bot.profile.name.normalizedProfile() == openProfile,
+                )
+            ) {
+                val session = bot.profile.canonicalSession ?: bot.profile.preferredSession
+                postHermesNotification(context,
+                    "bot:$backendId:${bot.profile.name}".hashCode(),
+                    HermesNotificationKind.COMPLETION,
+                    HermesDestinationRoute.Chats(backendId, bot.profile.name, session?.let { it.resolvedId ?: it.id }),
+                )
+            }
+        }
+        activity = bots.associate { it.profile.name to maxOf(previous[it.profile.name] ?: 0.0, it.activityTimestamp) }
+    }
+    SideEffect {
+        val current = state.botGroups.needsYouRoomIds
+        val previous = needsYou
+        (current - previous).forEach { roomId ->
+            val room = state.botGroups.rooms.firstOrNull { it.roomId == roomId } ?: return@forEach
+            val hidden = botGroupSpeakerHidden(room, bots, backendId, state.botCandidates)
+            if (shouldNotifyBotEvent(hidden, initialized = true, changed = true)) {
+                postHermesNotification(context,
+                    "group:$backendId:$roomId".hashCode(),
+                    HermesNotificationKind.ACTION_REQUIRED,
+                    HermesDestinationRoute.Chats(backendId, state.currentProfile),
+                )
+            }
+        }
+        needsYou = current
+    }
+    SideEffect {
+        state.cronJobs.forEach { job ->
+            val owner = job.botRoutineOwner() ?: return@forEach
+            val lastRun = job.lastRunAt ?: return@forEach
+            val prior = routineRuns[job.id]
+            val hidden = bots.firstOrNull { it.profile.name.equals(owner, ignoreCase = true) }?.hidden == true
+            if (shouldNotifyBotEvent(hidden, initialized = job.id in routineRuns, changed = prior != lastRun)) {
+                postHermesNotification(context,
+                    "routine:$backendId:${job.id}".hashCode(),
+                    if (job.lastError.isNullOrBlank()) HermesNotificationKind.CRON_RESULT else HermesNotificationKind.AUTOMATION_FAILURE,
+                    HermesDestinationRoute.Automations(backendId, owner, AutomationDestination.CRON, job.id),
+                )
+            }
+        }
+        routineRuns = state.cronJobs.associate { it.id to it.lastRunAt }
+    }
+}
 
 @Composable
 internal fun BotInboxSelector(
@@ -199,6 +303,7 @@ internal fun BotRow(
     onClick: () -> Unit,
     onToggleHidden: (() -> Unit)? = null,
     onEdit: (() -> Unit)? = null,
+    onRoutines: (() -> Unit)? = null,
     avatarData: String? = null,
 ) {
     val active = bot.isActive(nowMillis, busyProfile)
@@ -225,6 +330,7 @@ internal fun BotRow(
                     onClick { onClick(); true }
                     customActions = listOfNotNull(
                         onEdit?.let { edit -> CustomAccessibilityAction("Edit ${bot.name}") { edit(); true } },
+                        onRoutines?.let { routines -> CustomAccessibilityAction("Open ${bot.name} routines") { routines(); true } },
                         onToggleHidden?.let { toggle ->
                             CustomAccessibilityAction(if (bot.hidden) "Unhide ${bot.name}" else "Hide ${bot.name}") {
                                 toggle()
@@ -294,6 +400,9 @@ internal fun BotRow(
             }
             onEdit?.let { edit ->
                 IconButton(onClick = edit) { Icon(Icons.Outlined.Edit, "Edit ${bot.name}") }
+            }
+            onRoutines?.let { routines ->
+                IconButton(onClick = routines) { Icon(Icons.Outlined.Schedule, "${bot.name} routines") }
             }
             onToggleHidden?.let { toggle ->
                 IconButton(onClick = toggle) {

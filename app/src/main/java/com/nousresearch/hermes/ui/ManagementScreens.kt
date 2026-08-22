@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -36,6 +37,7 @@ import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Schedule
 import androidx.compose.material.icons.outlined.Star
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
@@ -68,8 +70,13 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.nousresearch.hermes.data.BackendConfig
 import com.nousresearch.hermes.data.BotAgentDraft
+import com.nousresearch.hermes.data.BotSchedule
+import com.nousresearch.hermes.data.BotScheduleFrequency
 import com.nousresearch.hermes.data.HermesState
 import com.nousresearch.hermes.data.ProfileIdentityDraft
+import com.nousresearch.hermes.data.botRoutineName
+import com.nousresearch.hermes.data.botRoutineOwner
+import com.nousresearch.hermes.data.botRoutineTitle
 import com.nousresearch.hermes.network.DashboardAuthProvider
 import com.nousresearch.hermes.protocol.CronJob
 import com.nousresearch.hermes.protocol.ProfileInfo
@@ -600,6 +607,7 @@ internal fun CronScreen(
     editorJob?.let { job ->
         CronEditorDialog(
             job = job,
+            owner = job.botRoutineOwner(),
             onDismiss = { editorJobId = null },
             onSave = { name, prompt, schedule, deliver ->
                 editorJobId = null
@@ -1643,8 +1651,93 @@ private fun SkillHubRow(skill: SkillHubResult, onReview: (String) -> Unit, modif
 }
 
 @Composable
+internal fun BotRoutinesDialog(
+    state: HermesState,
+    owner: String,
+    onRefresh: () -> Unit,
+    onSetEnabled: (String, Boolean) -> Unit,
+    onTrigger: (String) -> Unit,
+    onLoadRuns: (String) -> Unit,
+    onOpenRun: (StoredSession) -> Unit,
+    onCreate: (String, String, String, String) -> Unit,
+    onUpdate: (String, String, String, String, String) -> Unit,
+    onDelete: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var creating by rememberSaveable(owner) { mutableStateOf(false) }
+    var editingId by remember(owner) { mutableStateOf<String?>(null) }
+    var deleteId by remember(owner) { mutableStateOf<String?>(null) }
+    var expandedId by remember(owner) { mutableStateOf<String?>(null) }
+    val routines = state.cronJobs.filter { it.botRoutineOwner() == owner.lowercase() }
+    val editing = routines.firstOrNull { it.id == editingId }
+    val deleting = routines.firstOrNull { it.id == deleteId }
+    LaunchedEffect(owner) { onRefresh() }
+    if (creating || editing != null) {
+        CronEditorDialog(
+            job = editing,
+            owner = owner,
+            onDismiss = { creating = false; editingId = null },
+            onSave = { name, prompt, schedule, deliver ->
+                if (editing == null) onCreate(name, prompt, schedule, deliver)
+                else onUpdate(editing.id, name, prompt, schedule, deliver)
+                creating = false
+                editingId = null
+            },
+        )
+        return
+    }
+    if (deleting != null) {
+        AlertDialog(
+            onDismissRequest = { deleteId = null },
+            title = { Text("Delete ${deleting.botRoutineTitle()}?") },
+            text = { Text("Future runs stop. Existing run history and the bot's chats are kept.") },
+            confirmButton = {
+                TextButton(onClick = { deleteId = null; onDelete(deleting.id) }) { Text("Delete") }
+            },
+            dismissButton = { TextButton(onClick = { deleteId = null }) { Text("Cancel") } },
+        )
+        return
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("${owner.replaceFirstChar(Char::uppercase)} routines") },
+        text = {
+            Column(
+                Modifier.fillMaxWidth().heightIn(max = 560.dp).verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text("Scheduled work runs on this Hermes backend and stays attached to this bot.", style = MaterialTheme.typography.bodySmall)
+                if (state.managementLoading && routines.isEmpty()) CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
+                if (!state.managementLoading && routines.isEmpty()) Text("No routines yet.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                routines.forEach { job ->
+                    CronRow(
+                        job = job,
+                        title = job.botRoutineTitle(),
+                        onSetEnabled = onSetEnabled,
+                        onTrigger = onTrigger,
+                        runs = state.cronRuns[job.id],
+                        expanded = expandedId == job.id,
+                        onHistory = {
+                            expandedId = job.id.takeUnless { expandedId == job.id }
+                            if (expandedId == job.id) onLoadRuns(job.id)
+                        },
+                        onOpenRun = onOpenRun,
+                        onEdit = { editingId = job.id },
+                        onDelete = { deleteId = job.id },
+                    )
+                }
+                state.error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+            }
+        },
+        confirmButton = { TextButton(onClick = { creating = true }) { Text("New routine") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Done") } },
+    )
+}
+
+@Composable
 private fun CronRow(
     job: CronJob,
+    title: String = job.name?.takeIf(String::isNotBlank) ?: job.id,
     onSetEnabled: (String, Boolean) -> Unit,
     onTrigger: (String) -> Unit,
     runs: List<StoredSession>?,
@@ -1661,18 +1754,12 @@ private fun CronRow(
                 Icon(Icons.Outlined.Schedule, null, tint = MaterialTheme.colorScheme.primary)
                 Spacer(Modifier.width(10.dp))
                 Column(Modifier.weight(1f)) {
-                    Text(job.name?.takeIf(String::isNotBlank) ?: job.id, fontWeight = FontWeight.SemiBold)
+                    Text(title, fontWeight = FontWeight.SemiBold)
                     Text(
                         job.scheduleDisplay ?: job.schedule?.display ?: job.schedule?.expr ?: "Schedule unavailable",
                         style = MaterialTheme.typography.bodySmall,
                     )
                 }
-                IconButton(onClick = { onSetEnabled(job.id, !job.enabled) }) {
-                    Icon(if (job.enabled) Icons.Outlined.Pause else Icons.Outlined.PlayArrow, if (job.enabled) "Pause job" else "Resume job")
-                }
-                IconButton(onClick = { onTrigger(job.id) }) { Icon(Icons.Outlined.PlayArrow, "Run job now") }
-                IconButton(onClick = onEdit) { Icon(Icons.Outlined.Edit, "Edit job") }
-                IconButton(onClick = onDelete) { Icon(Icons.Outlined.Delete, "Delete job") }
             }
             job.prompt?.takeIf(String::isNotBlank)?.let {
                 Text(it, style = MaterialTheme.typography.bodyMedium, maxLines = 3, overflow = TextOverflow.Ellipsis)
@@ -1683,6 +1770,14 @@ private fun CronRow(
                 job.deliver?.let { Text("DELIVER $it", style = MaterialTheme.typography.labelSmall) }
             }
             job.lastError?.let { Text("Last failure: $it", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                IconButton(onClick = { onSetEnabled(job.id, !job.enabled) }) {
+                    Icon(if (job.enabled) Icons.Outlined.Pause else Icons.Outlined.PlayArrow, if (job.enabled) "Pause job" else "Resume job")
+                }
+                IconButton(onClick = { onTrigger(job.id) }) { Icon(Icons.Outlined.PlayArrow, "Run job now") }
+                IconButton(onClick = onEdit) { Icon(Icons.Outlined.Edit, "Edit job") }
+                IconButton(onClick = onDelete) { Icon(Icons.Outlined.Delete, "Delete job") }
+            }
             TextButton(onClick = onHistory) {
                 Icon(Icons.Outlined.History, null, Modifier.size(18.dp))
                 Spacer(Modifier.width(6.dp))
@@ -1724,16 +1819,21 @@ private fun CronRow(
 @Composable
 private fun CronEditorDialog(
     job: CronJob?,
+    owner: String? = null,
     onDismiss: () -> Unit,
     onSave: (String, String, String, String) -> Unit,
 ) {
-    var name by remember(job?.id) { mutableStateOf(job?.name.orEmpty()) }
+    var name by remember(job?.id, owner) { mutableStateOf(if (owner == null) job?.name.orEmpty() else job?.botRoutineTitle().orEmpty()) }
     var prompt by remember(job?.id) { mutableStateOf(job?.prompt.orEmpty()) }
-    var schedule by remember(job?.id) {
-        mutableStateOf(job?.schedule?.expr ?: job?.scheduleDisplay.orEmpty())
+    var schedule by remember(job?.id, owner) {
+        mutableStateOf(
+            if (job == null) BotSchedule()
+            else BotSchedule.parse(job.schedule?.expr ?: job.schedule?.display ?: job.scheduleDisplay.orEmpty()),
+        )
     }
     var deliver by remember(job?.id) { mutableStateOf(job?.deliver.orEmpty()) }
-    val valid = prompt.isNotBlank() && schedule.isNotBlank()
+    val scheduleExpression = schedule.expression()
+    val valid = prompt.isNotBlank() && scheduleExpression.isNotBlank()
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(if (job == null) "CREATE CRON JOB" else "EDIT CRON JOB") },
@@ -1744,20 +1844,98 @@ private fun CronEditorDialog(
             ) {
                 OutlinedTextField(name, { name = it.take(200) }, label = { Text("Name") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
                 OutlinedTextField(prompt, { prompt = it }, label = { Text("Hermes prompt") }, modifier = Modifier.fillMaxWidth(), minLines = 3, maxLines = 7)
-                OutlinedTextField(
-                    schedule,
-                    { schedule = it },
-                    label = { Text("Exact schedule") },
-                    supportingText = { Text("Cron expression or schedule form accepted by this Hermes server; timezone is evaluated server-side.") },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true,
-                )
+                BotScheduleEditor(schedule, { schedule = it })
                 OutlinedTextField(deliver, { deliver = it }, label = { Text("Delivery destination (optional)") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
             }
         },
-        confirmButton = { TextButton(onClick = { onSave(name, prompt, schedule, deliver) }, enabled = valid) { Text("Save") } },
+        confirmButton = {
+            TextButton(
+                onClick = { onSave(owner?.let { botRoutineName(it, name) } ?: name, prompt, scheduleExpression, deliver) },
+                enabled = valid,
+            ) { Text("Save") }
+        },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
+}
+
+@Composable
+private fun BotScheduleEditor(value: BotSchedule, onChange: (BotSchedule) -> Unit) {
+    val labels = listOf(
+        BotScheduleFrequency.ONCE to "Once",
+        BotScheduleFrequency.HOURLY to "Hourly",
+        BotScheduleFrequency.DAILY to "Daily",
+        BotScheduleFrequency.WEEKDAYS to "Weekdays",
+        BotScheduleFrequency.WEEKLY to "Weekly",
+        BotScheduleFrequency.MONTHLY to "Monthly",
+        BotScheduleFrequency.INTERVAL to "Interval",
+        BotScheduleFrequency.ADVANCED to "Advanced",
+    )
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("Schedule", style = MaterialTheme.typography.labelLarge)
+        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            labels.forEach { (frequency, label) ->
+                FilterChip(selected = value.frequency == frequency, onClick = { onChange(value.copy(frequency = frequency)) }, label = { Text(label) })
+            }
+        }
+        when (value.frequency) {
+            BotScheduleFrequency.ONCE, BotScheduleFrequency.INTERVAL -> {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedTextField(
+                        value.amount.toString(),
+                        { next -> next.filter(Char::isDigit).toIntOrNull()?.let { onChange(value.copy(amount = it.coerceIn(1, 9999))) } },
+                        label = { Text(if (value.frequency == BotScheduleFrequency.ONCE) "Run in" else "Every") },
+                        modifier = Modifier.weight(1f),
+                        singleLine = true,
+                    )
+                    "mhd".forEach { unit ->
+                        FilterChip(
+                            selected = value.unit == unit,
+                            onClick = { onChange(value.copy(unit = unit)) },
+                            label = { Text(mapOf('m' to "min", 'h' to "hr", 'd' to "day").getValue(unit)) },
+                        )
+                    }
+                }
+            }
+            BotScheduleFrequency.DAILY, BotScheduleFrequency.WEEKDAYS, BotScheduleFrequency.WEEKLY, BotScheduleFrequency.MONTHLY -> {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value.hour.toString().padStart(2, '0'),
+                        { it.filter(Char::isDigit).toIntOrNull()?.takeIf { hour -> hour in 0..23 }?.let { hour -> onChange(value.copy(hour = hour)) } },
+                        label = { Text("Hour") }, modifier = Modifier.weight(1f), singleLine = true,
+                    )
+                    OutlinedTextField(
+                        value.minute.toString().padStart(2, '0'),
+                        { it.filter(Char::isDigit).toIntOrNull()?.takeIf { minute -> minute in 0..59 }?.let { minute -> onChange(value.copy(minute = minute)) } },
+                        label = { Text("Minute") }, modifier = Modifier.weight(1f), singleLine = true,
+                    )
+                }
+                if (value.frequency == BotScheduleFrequency.WEEKLY) {
+                    OutlinedTextField(
+                        value.weekday.toString(),
+                        { it.filter(Char::isDigit).toIntOrNull()?.takeIf { day -> day in 0..6 }?.let { day -> onChange(value.copy(weekday = day)) } },
+                        label = { Text("Weekday (0 Sunday – 6 Saturday)") }, modifier = Modifier.fillMaxWidth(), singleLine = true,
+                    )
+                }
+                if (value.frequency == BotScheduleFrequency.MONTHLY) {
+                    OutlinedTextField(
+                        value.monthDay.toString(),
+                        { it.filter(Char::isDigit).toIntOrNull()?.takeIf { day -> day in 1..31 }?.let { day -> onChange(value.copy(monthDay = day)) } },
+                        label = { Text("Day of month") }, modifier = Modifier.fillMaxWidth(), singleLine = true,
+                    )
+                }
+            }
+            BotScheduleFrequency.ADVANCED -> OutlinedTextField(
+                value.raw,
+                { onChange(value.copy(raw = it.take(200))) },
+                label = { Text("Exact schedule") },
+                supportingText = { Text("Use a 5-field cron expression or a Hermes schedule such as every 2h.") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+            )
+            BotScheduleFrequency.HOURLY -> Unit
+        }
+        Text(value.expression().ifBlank { "Enter an exact schedule" }, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
 }
 
 @Composable

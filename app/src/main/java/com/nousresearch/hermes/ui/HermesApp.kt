@@ -216,6 +216,8 @@ import com.nousresearch.hermes.data.BotAgentDraft
 import com.nousresearch.hermes.data.SlashSuggestion
 import com.nousresearch.hermes.data.normalizedProfile
 import com.nousresearch.hermes.data.isActiveCanonicalBotChat
+import com.nousresearch.hermes.data.botMentionToken
+import com.nousresearch.hermes.data.completeBotMention
 import com.nousresearch.hermes.domain.MessageRole
 import com.nousresearch.hermes.domain.ComposerBrowseState
 import com.nousresearch.hermes.domain.ComposerHistory
@@ -326,10 +328,12 @@ private data class ManagementActions(
     val uninstallSkill: (String) -> Unit,
     val updateSkills: () -> Unit,
     val refreshCron: () -> Unit,
+    val refreshBotRoutines: (String) -> Unit,
     val refreshCronRuns: (String) -> Unit,
     val setCronEnabled: (String, Boolean) -> Unit,
     val triggerCron: (String) -> Unit,
     val createCron: (String, String, String, String) -> Unit,
+    val createBotRoutine: (String, String, String, String, String) -> Unit,
     val updateCron: (String, String, String, String, String) -> Unit,
     val deleteCron: (String) -> Unit,
     val refreshProfiles: () -> Unit,
@@ -483,10 +487,12 @@ fun HermesApp(
             uninstallSkill = viewModel::uninstallSkill,
             updateSkills = viewModel::updateSkills,
             refreshCron = viewModel::refreshCron,
+            refreshBotRoutines = viewModel::refreshBotRoutines,
             refreshCronRuns = viewModel::refreshCronRuns,
             setCronEnabled = viewModel::setCronEnabled,
             triggerCron = viewModel::triggerCron,
             createCron = viewModel::createCron,
+            createBotRoutine = viewModel::createBotRoutine,
             updateCron = viewModel::updateCron,
             deleteCron = viewModel::deleteCron,
             refreshProfiles = viewModel::refreshProfiles,
@@ -1204,8 +1210,10 @@ private fun HermesWorkspace(
         val backendId = requireNotNull(state.backend).id
         val profileId = route.profileIdOr(state.currentProfile)
         LaunchedEffect(botModeEnabled, backendId) {
+            var cronPoll = 0
             while (botModeEnabled) {
                 managementActions.refreshBotRoster()
+                if (cronPoll++ % 4 == 0) managementActions.refreshCron()
                 delay(15_000)
             }
         }
@@ -1219,11 +1227,22 @@ private fun HermesWorkspace(
         var requestedProfileEditor by rememberSaveable(backendId) { mutableStateOf<String?>(null) }
         var selectedBotGroupId by rememberSaveable(backendId) { mutableStateOf<String?>(null) }
         var editingBotGroupId by rememberSaveable(backendId) { mutableStateOf<String?>(null) }
+        var routineBotProfile by rememberSaveable(backendId) { mutableStateOf<String?>(null) }
+        if (botModeEnabled) BotActivityNotifications(state)
         var botGroupCandidates by remember(backendId) {
             mutableStateOf<List<com.nousresearch.hermes.protocol.BotGroupCandidate>>(emptyList())
         }
         var botGroupCandidatesLoading by remember(backendId) { mutableStateOf(false) }
         var unavailableBotGroupSources by remember(backendId) { mutableStateOf<List<String>>(emptyList()) }
+        LaunchedEffect(botModeEnabled, backendId) {
+            while (botModeEnabled) {
+                runCatching { managementActions.botGroupCandidates() }.getOrNull()?.let { result ->
+                    botGroupCandidates = result.candidates
+                    unavailableBotGroupSources = result.unavailableSources
+                }
+                delay(30_000)
+            }
+        }
         val selectedBotGroup = state.botGroups.rooms.firstOrNull { it.roomId == selectedBotGroupId }
         LaunchedEffect(editingBotGroupId) {
             if (editingBotGroupId != null) {
@@ -1416,6 +1435,7 @@ private fun HermesWorkspace(
                         onApprove, onClarify, onSensitiveInput, modelActions, sessionActions, queueActions,
                         Modifier.weight(1f),
                         compactLayout = compact,
+                        mentionCandidates = if (botModeEnabled) botGroupCandidates else emptyList(),
                         adaptiveFocusState = composerAdaptiveFocusState,
                         expandedToolIds = expandedToolIds.toSet(),
                         toolDisclosureKey = { tool ->
@@ -1686,6 +1706,7 @@ private fun HermesWorkspace(
                             onCreateGroup = { editingBotGroupId = "" },
                             selectedBotGroupId = selectedBotGroupId,
                             onEditBot = editBot,
+                            onBotRoutines = { routineBotProfile = it },
                             onAppSettings = { navigator.openAppSettings() },
                             onBackends = { navigate(WorkspaceContent.BACKENDS) },
                             botModeEnabled = botModeEnabled,
@@ -1737,6 +1758,7 @@ private fun HermesWorkspace(
                         onCreateGroup = { editingBotGroupId = "" },
                         selectedBotGroupId = selectedBotGroupId,
                         onEditBot = editBot,
+                        onBotRoutines = { routineBotProfile = it },
                         onAppSettings = { navigator.openAppSettings() },
                         onBackends = { navigate(WorkspaceContent.BACKENDS) },
                         botModeEnabled = botModeEnabled,
@@ -1801,6 +1823,23 @@ private fun HermesWorkspace(
                         if (selectedBotGroupId == current.roomId) selectedBotGroupId = null
                     }
                 },
+            )
+        }
+        routineBotProfile?.let { owner ->
+            BotRoutinesDialog(
+                state = state,
+                owner = owner,
+                onRefresh = { managementActions.refreshBotRoutines(owner) },
+                onSetEnabled = managementActions.setCronEnabled,
+                onTrigger = managementActions.triggerCron,
+                onLoadRuns = managementActions.refreshCronRuns,
+                onOpenRun = openStoredSession,
+                onCreate = { name, prompt, schedule, deliver ->
+                    managementActions.createBotRoutine(owner, name, prompt, schedule, deliver)
+                },
+                onUpdate = managementActions.updateCron,
+                onDelete = managementActions.deleteCron,
+                onDismiss = { routineBotProfile = null },
             )
         }
 
@@ -2047,6 +2086,7 @@ private fun SessionRail(
     onCreateGroup: () -> Unit,
     selectedBotGroupId: String?,
     onEditBot: (String) -> Unit,
+    onBotRoutines: (String) -> Unit,
     onAppSettings: () -> Unit,
     onBackends: () -> Unit,
     botModeEnabled: Boolean,
@@ -2094,7 +2134,8 @@ private fun SessionRail(
     val visibleBots = allBots.filter { (showHiddenBots || !it.hidden) && it.matches(query) }
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val drawerScope = rememberCoroutineScope()
-    val timeFormat = android.text.format.DateFormat.getTimeFormat(LocalContext.current)
+    val context = LocalContext.current
+    val timeFormat = android.text.format.DateFormat.getTimeFormat(context)
     var timestampNowMillis by remember { mutableLongStateOf(System.currentTimeMillis()) }
     LifecycleResumeEffect(Unit) {
         timestampNowMillis = System.currentTimeMillis()
@@ -2119,12 +2160,11 @@ private fun SessionRail(
             activityWatermarks = allBots.associate { it.profile.name to it.activityTimestamp }
         } else {
             val selectedProfile = state.activeStoredSession?.profile.normalizedProfile()
-            unreadProfiles = unreadProfiles + allBots.mapNotNull { bot ->
+            val advanced = allBots.filter { bot ->
                 val previous = activityWatermarks[bot.profile.name] ?: bot.activityTimestamp
-                bot.profile.name.takeIf {
-                    bot.activityTimestamp > previous && bot.profile.name.normalizedProfile() != selectedProfile
-                }
+                bot.activityTimestamp > previous && bot.profile.name.normalizedProfile() != selectedProfile
             }
+            unreadProfiles = unreadProfiles + advanced.map { it.profile.name }
             activityWatermarks = allBots.associate { it.profile.name to maxOf(activityWatermarks[it.profile.name] ?: 0.0, it.activityTimestamp) }
         }
     }
@@ -2284,6 +2324,7 @@ private fun SessionRail(
                                     onSetBotHidden(bot.profile.name, !bot.hidden)
                                 },
                                 onEdit = { onEditBot(bot.profile.name) },
+                                onRoutines = { onBotRoutines(bot.profile.name) },
                                 avatarData = botAvatars[bot.profile.name],
                             )
                         }
@@ -2858,6 +2899,7 @@ private fun ChatSurface(
     queueActions: QueueActions,
     modifier: Modifier = Modifier,
     compactLayout: Boolean = true,
+    mentionCandidates: List<com.nousresearch.hermes.protocol.BotGroupCandidate> = emptyList(),
     adaptiveFocusState: AdaptiveFocusState,
     expandedToolIds: Set<String> = emptySet(),
     toolDisclosureKey: (TimelineItem.Tool) -> String = { it.id },
@@ -2932,6 +2974,9 @@ private fun ChatSurface(
                 queueDraining = state.queueDraining,
                 queueNotice = state.queueNotice,
                 canonicalBotChat = state.isActiveCanonicalBotChat(),
+                mentionCandidates = mentionCandidates,
+                activeProfile = state.activeStoredSession?.profile ?: state.activeProfile,
+                activeBackendId = state.backend?.id.orEmpty(),
                 onSend = onSend,
                 onSteer = onSteer,
                 onQueue = queueActions.enqueueDraft,
@@ -3495,6 +3540,9 @@ private fun Composer(
     queueDraining: Boolean,
     queueNotice: String?,
     canonicalBotChat: Boolean,
+    mentionCandidates: List<com.nousresearch.hermes.protocol.BotGroupCandidate>,
+    activeProfile: String,
+    activeBackendId: String,
     onSend: (String) -> Unit,
     onSteer: (String) -> Unit,
     onQueue: () -> Unit,
@@ -3608,6 +3656,14 @@ private fun Composer(
         }
     }
     Column(Modifier.fillMaxWidth().imePadding().navigationBarsPadding().padding(12.dp)) {
+        val mentionToken = botMentionToken(draft)
+        val mentionOptions = remember(mentionToken?.query, mentionCandidates, activeProfile, activeBackendId) {
+            val query = mentionToken?.query.orEmpty()
+            if (mentionToken == null) emptyList() else mentionCandidates.filter { candidate ->
+                !(candidate.backendId == activeBackendId && candidate.profile.name.equals(activeProfile, ignoreCase = true)) &&
+                    candidate.handle.startsWith(query, ignoreCase = true)
+            }.take(6)
+        }
         if (queuedPrompts.isNotEmpty() || queueNotice != null) {
             PendingMessageQueue(
                 entries = queuedPrompts,
@@ -3630,6 +3686,32 @@ private fun Composer(
                 onSuggestion = onDraftChange,
             )
             Spacer(Modifier.height(8.dp))
+        }
+        if (mentionToken != null && mentionOptions.isNotEmpty()) {
+            Surface(
+                color = MaterialTheme.colorScheme.surfaceVariant,
+                shape = RoundedCornerShape(8.dp),
+                modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+            ) {
+                Column {
+                    mentionOptions.forEach { candidate ->
+                        TextButton(
+                            onClick = { onDraftChange(completeBotMention(draft, mentionToken, candidate.handle)) },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Column(Modifier.fillMaxWidth()) {
+                                Text("@${candidate.handle}", style = MaterialTheme.typography.labelLarge)
+                                Text(
+                                    listOf(candidate.profile.displayName.ifBlank { candidate.profile.name }, candidate.backendLabel)
+                                        .filter(String::isNotBlank).joinToString(" · "),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
         }
         if (attachments.isNotEmpty()) {
             FlowRow(
