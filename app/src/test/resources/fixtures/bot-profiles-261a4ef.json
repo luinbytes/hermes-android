@@ -1,0 +1,52 @@
+{
+  "profiles": [
+    {
+      "name": "default",
+      "path": "/srv/hermes",
+      "is_default": true,
+      "model": "hermes-4",
+      "provider": "nous",
+      "description": "General assistant",
+      "display_name": "Hermes",
+      "skill_count": 4,
+      "has_avatar": true,
+      "last_session": {
+        "id": "visible-1",
+        "title": "Visible work",
+        "preview": "A visible update",
+        "message_count": 3,
+        "started_at": 1777000000,
+        "last_active": 1777000100
+      },
+      "canonical_session": {
+        "id": "bot-chat-1",
+        "resolved_id": "bot-chat-tip",
+        "root_title": "Bot Chat",
+        "title": "Bot Chat",
+        "preview": "Message from coder: Build is green",
+        "message_count": 8,
+        "started_at": 1777000000,
+        "last_active": 1777000200
+      },
+      "worker_session": {
+        "id": "worker-1",
+        "title": "Worker",
+        "last_active": 1777000250,
+        "source": "kanban"
+      },
+      "ui_meta": {
+        "hermes-bots": {
+          "chat": "bot-chat-1",
+          "hidden": false,
+          "title": "Hermes"
+        }
+      },
+      "ui_meta_revisions": {
+        "hermes-bots": 3
+      },
+      "future_field": "ignored"
+    }
+  ],
+  "bot_mode_protocol": true,
+  "future_top_level": true
+}

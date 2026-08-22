@@ -2,8 +2,8 @@ package com.nousresearch.hermes.protocol
 
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
-import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 
 @Serializable
 data class SkillInfo(
@@ -110,7 +110,25 @@ data class CronRunPage(
 )
 
 @Serializable
+data class BotSessionSummary(
+    val id: String,
+    @SerialName("resolved_id") val resolvedId: String? = null,
+    @SerialName("root_title") val rootTitle: String? = null,
+    val title: String = "",
+    val preview: String = "",
+    @SerialName("message_count") val messageCount: Int = 0,
+    @SerialName("started_at") val startedAt: Double = 0.0,
+    @SerialName("last_active") val lastActive: Double = startedAt,
+    val source: String? = null,
+)
+
+@Serializable
 data class ProfileInfo(
+    val description: String = "",
+    @SerialName("description_auto") val descriptionAuto: Boolean = false,
+    @SerialName("display_name") val displayName: String = "",
+    @SerialName("gateway_running") val gatewayRunning: Boolean = false,
+    @SerialName("has_avatar") val hasAvatar: Boolean = false,
     @SerialName("has_env") val hasEnv: Boolean = false,
     @SerialName("is_default") val isDefault: Boolean = false,
     val model: String? = null,
@@ -118,11 +136,19 @@ data class ProfileInfo(
     val path: String = "",
     val provider: String? = null,
     @SerialName("skill_count") val skillCount: Int = 0,
+    @SerialName("last_session") val lastSession: BotSessionSummary? = null,
+    @SerialName("canonical_session") val canonicalSession: BotSessionSummary? = null,
+    // Compatibility with the short-lived pre-registry resolver contract.
+    @SerialName("preferred_session") val preferredSession: BotSessionSummary? = null,
+    @SerialName("worker_session") val workerSession: BotSessionSummary? = null,
+    @SerialName("ui_meta") val uiMeta: JsonObject? = null,
+    @SerialName("ui_meta_revisions") val uiMetaRevisions: Map<String, Long> = emptyMap(),
 )
 
 @Serializable
 data class ProfilesResponse(
     val profiles: List<ProfileInfo> = emptyList(),
+    @SerialName("bot_mode_protocol") val botModeProtocol: Boolean = false,
 )
 
 @Serializable

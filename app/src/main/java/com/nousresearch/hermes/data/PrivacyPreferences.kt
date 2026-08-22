@@ -46,6 +46,10 @@ class PrivacyPreferences internal constructor(
         .map { it[BIOMETRIC_REENTRY] ?: false }
         .catch { emit(true) }
 
+    val botModeEnabled: Flow<Boolean> = store.data
+        .map { it[BOT_MODE_ENABLED] ?: false }
+        .catch { emit(false) }
+
     val skin: Flow<HermesSkin> = store.data
         .map { HermesSkin.fromId(it[SKIN]) }
         .catch { emit(HermesSkin.NOUS) }
@@ -56,6 +60,10 @@ class PrivacyPreferences internal constructor(
 
     suspend fun setBiometricReentry(enabled: Boolean) {
         store.edit { it[BIOMETRIC_REENTRY] = enabled }
+    }
+
+    suspend fun setBotModeEnabled(enabled: Boolean) {
+        store.edit { it[BOT_MODE_ENABLED] = enabled }
     }
 
     suspend fun setSkin(skin: HermesSkin) {
@@ -88,6 +96,7 @@ class PrivacyPreferences internal constructor(
     private companion object {
         val SECURE_SCREEN = booleanPreferencesKey("secure_screen")
         val BIOMETRIC_REENTRY = booleanPreferencesKey("biometric_reentry")
+        val BOT_MODE_ENABLED = booleanPreferencesKey("bot_mode_enabled")
         val SKIN = stringPreferencesKey("skin")
     }
 }

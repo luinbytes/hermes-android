@@ -27,7 +27,7 @@ class HermesRestClientProfilesTest {
                 allowInsecurePrivateNetwork = true,
             )
             val client = HermesRestClient(OkHttpClient(), json)
-            server.enqueue(MockResponse().setBody("""{"profiles":[{"name":"default","is_default":true,"skill_count":4},{"name":"coder","provider":"nous","model":"hermes-4","skill_count":9}]}"""))
+            server.enqueue(MockResponse().setBody("""{"profiles":[{"name":"default","display_name":"Hermes","description":"General assistant","is_default":true,"skill_count":4},{"name":"coder","display_name":"Code Fox","description":"Builds Android apps","description_auto":false,"provider":"nous","model":"hermes-4","skill_count":9,"gateway_running":true}]}"""))
             server.enqueue(MockResponse().setBody("""{"active":"coder","current":"default"}"""))
             server.enqueue(MockResponse().setBody("""{"ok":true,"name":"research","path":"/profiles/research"}"""))
             server.enqueue(MockResponse().setBody("""{"ok":true,"name":"engineering","path":"/profiles/engineering"}"""))
@@ -54,6 +54,9 @@ class HermesRestClientProfilesTest {
             client.updateProfileModel(config, "secret", "engineering", "nous", "hermes-4")
 
             assertTrue(profiles.profiles.first().isDefault)
+            assertEquals("Hermes", profiles.profiles.first().displayName)
+            assertEquals("Builds Android apps", profiles.profiles.last().description)
+            assertTrue(profiles.profiles.last().gatewayRunning)
             assertEquals("hermes-4", profiles.profiles.last().model)
             assertEquals("coder", active.active)
             assertEquals("default", active.current)

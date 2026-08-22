@@ -46,6 +46,7 @@ import com.nousresearch.hermes.protocol.MessagingPlatformTestResponse
 import com.nousresearch.hermes.protocol.PdfAttachResult
 import com.nousresearch.hermes.protocol.ProfileCreatePayload
 import com.nousresearch.hermes.protocol.ProfileInfo
+import com.nousresearch.hermes.protocol.ProfilesResponse
 import com.nousresearch.hermes.protocol.ProtocolMessage
 import com.nousresearch.hermes.protocol.PromptSubmitResult
 import com.nousresearch.hermes.protocol.RollbackCheckpoint
@@ -109,8 +110,25 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
+
+internal fun botHiddenConfigureParams(profile: ProfileInfo, hidden: Boolean) = buildJsonObject {
+    val existing = runCatching { profile.uiMeta?.get("hermes-bots")?.jsonObject }.getOrNull().orEmpty()
+    put("name", profile.name)
+    put("ui_meta", buildJsonObject {
+        put("hermes-bots", buildJsonObject {
+            existing.forEach(::put)
+            put("hidden", hidden)
+        })
+    })
+    put("ui_meta_expected_revisions", buildJsonObject {
+        put("hermes-bots", profile.uiMetaRevisions["hermes-bots"] ?: 0L)
+    })
+}
 
 data class HermesState(
     val backend: BackendConfig? = null,
@@ -373,6 +391,7 @@ class HermesRepository @Inject constructor(
     private val pendingSilentSessionListRefresh = AtomicBoolean()
     private val sessionListRefreshPriorityMutex = Mutex()
     private val backendCredentialGeneration = AtomicLong()
+    private val profileRefreshGeneration = AtomicLong()
     private val sessionListMutationMutex = Mutex()
     private var slashCompletionJob: Job? = null
     private var queueDrainJob: Job? = null
@@ -2091,20 +2110,55 @@ class HermesRepository @Inject constructor(
             .onFailure(::fail)
     }
 
-    suspend fun refreshProfiles() {
+    suspend fun refreshProfiles(showLoading: Boolean = true) {
         val (backend, token) = activeCredentials()
-        mutableState.value = mutableState.value.copy(managementLoading = true, error = null)
+        val credentialGeneration = backendCredentialGeneration.get()
+        val refreshGeneration = profileRefreshGeneration.incrementAndGet()
+        if (showLoading) mutableState.value = mutableState.value.copy(managementLoading = true, error = null)
         val result = runCatching {
-            restClient.profiles(backend, token) to restClient.activeProfile(backend, token)
+            val profiles = runCatching {
+                gateway.request(
+                    "profiles.list",
+                    buildJsonObject { put("include_sessions", true) },
+                )
+                    .let { json.decodeFromJsonElement(ProfilesResponse.serializer(), it) }
+            }.getOrElse { restClient.profiles(backend, token) }
+            profiles to restClient.activeProfile(backend, token)
         }
         result.onSuccess { (profiles, active) ->
+            if (
+                mutableState.value.backend?.id != backend.id ||
+                backendCredentialGeneration.get() != credentialGeneration ||
+                profileRefreshGeneration.get() != refreshGeneration
+            ) return@onSuccess
             mutableState.value = mutableState.value.copy(
                 profiles = profiles.profiles.sortedWith(compareByDescending<ProfileInfo> { it.isDefault }.thenBy { it.name }),
                 activeProfile = active.active,
                 currentProfile = active.current,
-                managementLoading = false,
+                managementLoading = if (showLoading) false else mutableState.value.managementLoading,
                 error = null,
             )
+        }.onFailure { error ->
+            if (
+                mutableState.value.backend?.id == backend.id &&
+                backendCredentialGeneration.get() == credentialGeneration &&
+                profileRefreshGeneration.get() == refreshGeneration
+            ) fail(error)
+        }
+    }
+
+    suspend fun setBotHidden(profileName: String, hidden: Boolean) {
+        val profile = mutableState.value.profiles.firstOrNull { it.name == profileName }
+            ?: throw IllegalArgumentException("Unknown Hermes profile")
+        runCatching {
+            val response = gateway.request(
+                "profiles.configure",
+                botHiddenConfigureParams(profile, hidden),
+            )
+            require(
+                response.jsonObject["applied"]?.jsonObject?.get("ui_meta")?.jsonPrimitive?.booleanOrNull == true,
+            ) { "Hermes did not save the Bot visibility change; refresh and try again" }
+            refreshProfiles()
         }.onFailure(::fail)
     }
 

@@ -102,6 +102,8 @@ import androidx.compose.material.icons.outlined.StopCircle
 import androidx.compose.material.icons.outlined.SwapHoriz
 import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material.icons.outlined.Tune
+import androidx.compose.material.icons.outlined.Visibility
+import androidx.compose.material.icons.outlined.VisibilityOff
 import androidx.compose.material.icons.outlined.Warning
 import androidx.compose.material.icons.outlined.Person
 import androidx.compose.material.icons.outlined.PushPin
@@ -324,6 +326,8 @@ private data class ManagementActions(
     val updateCron: (String, String, String, String, String) -> Unit,
     val deleteCron: (String) -> Unit,
     val refreshProfiles: () -> Unit,
+    val refreshBotRoster: () -> Unit,
+    val setBotHidden: (String, Boolean) -> Unit,
     val createProfile: (String, String, Boolean, Boolean) -> Unit,
     val renameProfile: (String, String) -> Unit,
     val setActiveProfile: (String) -> Unit,
@@ -386,6 +390,8 @@ fun HermesApp(
     onBiometricReentryChange: (Boolean) -> Unit = {},
     skin: HermesSkin = HermesSkin.NOUS,
     onSkinChange: (HermesSkin) -> Unit = {},
+    botModeEnabled: Boolean = false,
+    onBotModeEnabledChange: (Boolean) -> Unit = {},
     onWorkspaceReady: () -> Unit = {},
     entryDelivery: HermesEntryDelivery? = null,
     onEntryConsumed: (String) -> Unit = {},
@@ -462,6 +468,8 @@ fun HermesApp(
             updateCron = viewModel::updateCron,
             deleteCron = viewModel::deleteCron,
             refreshProfiles = viewModel::refreshProfiles,
+            refreshBotRoster = viewModel::refreshBotRoster,
+            setBotHidden = viewModel::setBotHidden,
             createProfile = viewModel::createProfile,
             renameProfile = viewModel::renameProfile,
             setActiveProfile = viewModel::setActiveProfile,
@@ -742,6 +750,8 @@ fun HermesApp(
             onBiometricReentryChange = onBiometricReentryChange,
             skin = skin,
             onSkinChange = onSkinChange,
+            botModeEnabled = botModeEnabled,
+            onBotModeEnabledChange = onBotModeEnabledChange,
         )
     }
     HermesTheme(skin) {
@@ -799,6 +809,8 @@ fun HermesApp(
                             onBiometricReentryChange = onBiometricReentryChange,
                             skin = skin,
                             onSkinChange = onSkinChange,
+                            botModeEnabled = botModeEnabled,
+                            onBotModeEnabledChange = onBotModeEnabledChange,
                             onBack = { appNavController.popBackStack() },
                             modifier = Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding(),
                         )
@@ -1129,6 +1141,8 @@ private fun HermesWorkspace(
     onBiometricReentryChange: (Boolean) -> Unit,
     skin: HermesSkin,
     onSkinChange: (HermesSkin) -> Unit,
+    botModeEnabled: Boolean,
+    onBotModeEnabledChange: (Boolean) -> Unit,
 ) {
     val context = LocalContext.current
     val openExternalUrl: (String) -> Unit = remember(context) {
@@ -1153,6 +1167,12 @@ private fun HermesWorkspace(
         val composerAdaptiveFocusState = rememberAdaptiveFocusState()
         val backendId = requireNotNull(state.backend).id
         val profileId = route.profileIdOr(state.currentProfile)
+        LaunchedEffect(botModeEnabled, backendId) {
+            while (botModeEnabled) {
+                managementActions.refreshBotRoster()
+                delay(15_000)
+            }
+        }
         val supportingSessionId = state.activeStoredSession?.durableId ?: state.runtimeSessionId.orEmpty()
         var supportingToolId by remember(backendId, profileId, supportingSessionId) {
             mutableStateOf<String?>(null)
@@ -1381,6 +1401,8 @@ private fun HermesWorkspace(
                         onBiometricReentryChange = onBiometricReentryChange,
                         skin = skin,
                         onSkinChange = onSkinChange,
+                        botModeEnabled = botModeEnabled,
+                        onBotModeEnabledChange = onBotModeEnabledChange,
                         onBack = { navigator.back(backendId, profileId) },
                         modifier = Modifier.weight(1f),
                     )
@@ -1547,6 +1569,8 @@ private fun HermesWorkspace(
                         SessionRail(
                             state, connection, onRefresh, onSearchSessions,
                             onSession = openStoredSession,
+                            onBot = { bot -> bot.latestSession?.let(openStoredSession) ?: createConversation(bot.profile.name) },
+                            onSetBotHidden = managementActions.setBotHidden,
                             onDeleteSession = onDeleteSession,
                             onArchiveSession = onArchiveSession,
                             onPinSession = onPinSession,
@@ -1556,6 +1580,7 @@ private fun HermesWorkspace(
                             onManage = { navigator.openManage(backendId, profileId) },
                             onAppSettings = { navigator.openAppSettings() },
                             onBackends = { navigate(WorkspaceContent.BACKENDS) },
+                            botModeEnabled = botModeEnabled,
                             compact = true,
                             modifier = Modifier.weight(1f).fillMaxHeight(),
                         )
@@ -1589,6 +1614,8 @@ private fun HermesWorkspace(
                     SessionRail(
                         state, connection, onRefresh, onSearchSessions,
                         onSession = openStoredSession,
+                        onBot = { bot -> bot.latestSession?.let(openStoredSession) ?: createConversation(bot.profile.name) },
+                        onSetBotHidden = managementActions.setBotHidden,
                         onDeleteSession = onDeleteSession,
                         onArchiveSession = onArchiveSession,
                         onPinSession = onPinSession,
@@ -1598,6 +1625,7 @@ private fun HermesWorkspace(
                         onManage = { navigator.openManage(backendId, profileId) },
                         onAppSettings = { navigator.openAppSettings() },
                         onBackends = { navigate(WorkspaceContent.BACKENDS) },
+                        botModeEnabled = botModeEnabled,
                         modifier = Modifier.width(330.dp).fillMaxHeight(),
                     )
                     HorizontalDivider(Modifier.fillMaxHeight().width(1.dp))
@@ -1863,6 +1891,8 @@ private fun SessionRail(
     onRefresh: () -> Unit,
     onSearchSessions: (String) -> Unit,
     onSession: (StoredSession) -> Unit,
+    onBot: (BotConversation) -> Unit,
+    onSetBotHidden: (String, Boolean) -> Unit,
     onDeleteSession: (StoredSession) -> Unit,
     onArchiveSession: (String, StoredSession) -> Unit,
     onPinSession: (String, StoredSession) -> Unit,
@@ -1872,12 +1902,19 @@ private fun SessionRail(
     onManage: () -> Unit,
     onAppSettings: () -> Unit,
     onBackends: () -> Unit,
+    botModeEnabled: Boolean,
     compact: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
     var query by remember { mutableStateOf("") }
+    var inboxMode by rememberSaveable(botModeEnabled) {
+        mutableStateOf(if (botModeEnabled) ChatInboxMode.BOTS else ChatInboxMode.SESSIONS)
+    }
     var pendingDelete by remember { mutableStateOf<StoredSession?>(null) }
     var confirmNewSession by rememberSaveable { mutableStateOf(false) }
+    var showHiddenBots by rememberSaveable(state.backend?.id) { mutableStateOf(false) }
+    var activityWatermarks by remember(state.backend?.id) { mutableStateOf<Map<String, Double>>(emptyMap()) }
+    var unreadProfiles by remember(state.backend?.id) { mutableStateOf<Set<String>>(emptySet()) }
     val visibleSessions = state.sessions.filter { session ->
         query.isBlank() || listOf(
             session.displayTitle,
@@ -1898,6 +1935,15 @@ private fun SessionRail(
     } else {
         listOf("" to visibleSessions)
     }
+    val allBots = botConversations(
+        state.profiles,
+        state.sessions,
+        state.activeStoredSession,
+        sourceLabel = state.backend?.label.orEmpty(),
+        unreadProfiles = unreadProfiles,
+    )
+    val hiddenBots = allBots.filter(BotConversation::hidden)
+    val visibleBots = allBots.filter { (showHiddenBots || !it.hidden) && it.matches(query) }
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val drawerScope = rememberCoroutineScope()
     val timeFormat = android.text.format.DateFormat.getTimeFormat(LocalContext.current)
@@ -1916,7 +1962,27 @@ private fun SessionRail(
     val startNewSession = {
         if (state.runtimeSessionId == null) onNewSession() else confirmNewSession = true
     }
-    LaunchedEffect(query) { onSearchSessions(query) }
+    val openBot: (BotConversation) -> Unit = { bot ->
+        unreadProfiles = unreadProfiles - bot.profile.name
+        onBot(bot)
+    }
+    LaunchedEffect(allBots.map { it.profile.name to it.activityTimestamp }) {
+        if (activityWatermarks.isEmpty()) {
+            activityWatermarks = allBots.associate { it.profile.name to it.activityTimestamp }
+        } else {
+            val selectedProfile = state.activeStoredSession?.profile.normalizedProfile()
+            unreadProfiles = unreadProfiles + allBots.mapNotNull { bot ->
+                val previous = activityWatermarks[bot.profile.name] ?: bot.activityTimestamp
+                bot.profile.name.takeIf {
+                    bot.activityTimestamp > previous && bot.profile.name.normalizedProfile() != selectedProfile
+                }
+            }
+            activityWatermarks = allBots.associate { it.profile.name to maxOf(activityWatermarks[it.profile.name] ?: 0.0, it.activityTimestamp) }
+        }
+    }
+    LaunchedEffect(query, inboxMode) {
+        onSearchSessions(if (inboxMode == ChatInboxMode.SESSIONS) query else "")
+    }
     val railContent: @Composable () -> Unit = {
         Box(modifier.background(Color.Transparent)) {
             Column(Modifier.fillMaxSize()) {
@@ -1938,12 +2004,23 @@ private fun SessionRail(
                         Text(state.backend?.label.orEmpty(), style = MaterialTheme.typography.bodySmall, maxLines = 1)
                     }
                     IconButton(onClick = onRefresh) { Icon(Icons.Outlined.Refresh, "Refresh conversations") }
+                    if (inboxMode == ChatInboxMode.BOTS && hiddenBots.isNotEmpty()) {
+                        IconButton(onClick = { showHiddenBots = !showHiddenBots }) {
+                            Icon(
+                                if (showHiddenBots) Icons.Outlined.VisibilityOff else Icons.Outlined.Visibility,
+                                if (showHiddenBots) "Hide hidden bots" else "Show hidden bots",
+                            )
+                        }
+                    }
                     if (!compact) {
                         IconButton(onClick = startNewSession) { Icon(Icons.Outlined.Add, "New conversation") }
                     }
                 }
                 ConnectionLine(connection)
                 if (state.sessionListLoading) LinearProgressIndicator(Modifier.fillMaxWidth())
+                if (botModeEnabled) {
+                    BotInboxSelector(inboxMode) { inboxMode = it }
+                }
                 if (!compact) {
                     Row(
                         Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
@@ -1995,7 +2072,7 @@ private fun SessionRail(
                 OutlinedTextField(
                     value = query,
                     onValueChange = { query = it.take(200) },
-                    placeholder = { Text("Search conversations") },
+                    placeholder = { Text(if (inboxMode == ChatInboxMode.BOTS) "Search bots" else "Search conversations") },
                     leadingIcon = { Icon(Icons.Outlined.Search, null) },
                     trailingIcon = {
                         if (state.sessionSearchLoading) {
@@ -2011,6 +2088,34 @@ private fun SessionRail(
                 LazyColumn(
                     contentPadding = PaddingValues(top = 8.dp, bottom = if (compact) 88.dp else 8.dp),
                 ) {
+                    if (inboxMode == ChatInboxMode.BOTS) {
+                        items(visibleBots, key = { "bot:${it.profile.name}" }) { bot ->
+                            BotRow(
+                                bot = bot,
+                                nowMillis = timestampNowMillis,
+                                busyProfile = state.activeProfile.takeIf { state.runtimeInfo.running },
+                                onClick = { openBot(bot) },
+                                onToggleHidden = {
+                                    onSetBotHidden(bot.profile.name, !bot.hidden)
+                                },
+                            )
+                        }
+                        if (visibleBots.isEmpty() && !state.managementLoading) {
+                            item("bots-empty") {
+                                Column(
+                                    Modifier.fillMaxWidth().padding(32.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                ) {
+                                    Text(if (state.profiles.isEmpty()) "NO BOTS YET" else "NO MATCHES", style = MaterialTheme.typography.titleMedium)
+                                    Text(
+                                        if (state.profiles.isEmpty()) "Refresh Hermes profiles or create an agent in Manage."
+                                        else "Try a bot name, role or recent conversation.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                    )
+                                }
+                            }
+                        }
+                    } else {
                     sessionSections.forEach { (section, sessions) ->
                         if (section.isNotEmpty() && sessions.isNotEmpty()) {
                             item("section:$section") {
@@ -2098,9 +2203,10 @@ private fun SessionRail(
                             }
                         }
                     }
+                    }
                 }
             }
-            if (compact) {
+            if (compact && inboxMode == ChatInboxMode.SESSIONS) {
                 FloatingActionButton(
                     onClick = startNewSession,
                     modifier = Modifier.align(Alignment.BottomEnd).padding(20.dp),
