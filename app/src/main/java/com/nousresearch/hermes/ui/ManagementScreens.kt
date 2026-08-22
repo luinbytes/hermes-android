@@ -1276,7 +1276,11 @@ private fun AgentCapabilityList(
     }
 }
 
-private fun profileAvatarDataUrl(context: android.content.Context, uri: Uri): String {
+internal fun profileAvatarDataUrl(
+    context: android.content.Context,
+    uri: Uri,
+    targetDataCharacters: Int? = null,
+): String {
     val mime = context.contentResolver.getType(uri)?.lowercase()
     require(mime in setOf("image/png", "image/jpeg", "image/webp")) { "Choose a PNG, JPEG, or WebP image" }
     val bytes = context.contentResolver.openInputStream(uri)?.use { input ->
@@ -1290,7 +1294,36 @@ private fun profileAvatarDataUrl(context: android.content.Context, uri: Uri): St
         output.toByteArray()
     } ?: throw IllegalArgumentException("Android could not read that image")
     require(bytes.size <= 2_000_000) { "Avatar images must be 2 MB or smaller" }
-    return "data:$mime;base64,${Base64.encodeToString(bytes, Base64.NO_WRAP)}"
+    if (targetDataCharacters == null) {
+        return "data:$mime;base64,${Base64.encodeToString(bytes, Base64.NO_WRAP)}"
+    }
+    var bitmap = android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+        ?: throw IllegalArgumentException("Android could not decode that image")
+    val longest = maxOf(bitmap.width, bitmap.height)
+    if (longest > 256) {
+        val scale = 256f / longest
+        val scaled = android.graphics.Bitmap.createScaledBitmap(
+            bitmap,
+            maxOf(1, (bitmap.width * scale).toInt()),
+            maxOf(1, (bitmap.height * scale).toInt()),
+            true,
+        )
+        bitmap.recycle()
+        bitmap = scaled
+    }
+    var quality = 88
+    var encoded: String
+    do {
+        val compressed = java.io.ByteArrayOutputStream().use { output ->
+            check(bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, quality, output))
+            output.toByteArray()
+        }
+        encoded = "data:image/jpeg;base64,${Base64.encodeToString(compressed, Base64.NO_WRAP)}"
+        quality -= 10
+    } while (encoded.length > targetDataCharacters && quality >= 38)
+    bitmap.recycle()
+    require(encoded.length <= targetDataCharacters) { "That picture could not be reduced to the group sync limit" }
+    return encoded
 }
 
 @Composable

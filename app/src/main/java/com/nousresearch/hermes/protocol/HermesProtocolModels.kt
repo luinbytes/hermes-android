@@ -398,6 +398,34 @@ data class SessionResumeResult(
     val inflight: SessionInflightProjection? = null,
     val queued: SessionQueuedProjection? = null,
     val info: SessionRuntimeInfo = SessionRuntimeInfo(),
+    @SerialName("pending_clarify") val pendingClarify: PendingClarify? = null,
+    @SerialName("pending_approval") val pendingApproval: PendingApproval? = null,
+)
+
+@Serializable
+data class PendingClarifyQuestion(
+    val qid: String? = null,
+    val id: String? = null,
+    val question: String = "",
+    val choices: List<String> = emptyList(),
+    @SerialName("multi_select") val multiSelect: Boolean = false,
+)
+
+@Serializable
+data class PendingClarify(
+    @SerialName("request_id") val requestId: String = "",
+    val question: String = "",
+    val choices: List<String> = emptyList(),
+    @SerialName("multi_select") val multiSelect: Boolean = false,
+    val questions: List<PendingClarifyQuestion> = emptyList(),
+)
+
+@Serializable
+data class PendingApproval(
+    @SerialName("request_id") val requestId: String = "",
+    val command: String = "",
+    val description: String = "",
+    val choices: List<String> = emptyList(),
 )
 
 @Serializable

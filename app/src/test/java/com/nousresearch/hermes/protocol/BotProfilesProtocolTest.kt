@@ -1,6 +1,8 @@
 package com.nousresearch.hermes.protocol
 
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.decodeFromJsonElement
+import kotlinx.serialization.json.jsonObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -71,5 +73,18 @@ class BotProfilesProtocolTest {
         assertTrue(result.enabled)
         assertTrue(result.pets.single().installed)
         assertEquals("Fox", result.pets.single().displayName)
+    }
+
+    @Test
+    fun `group resume preserves batch clarification and approval contracts`() {
+        val fixture = json.parseToJsonElement(
+            checkNotNull(javaClass.getResource("/fixtures/group-pending-resume-0287df.json")).readText(),
+        ).jsonObject
+        val clarify = json.decodeFromJsonElement<SessionResumeResult>(checkNotNull(fixture["clarify"])).pendingClarify!!
+        val approval = json.decodeFromJsonElement<SessionResumeResult>(checkNotNull(fixture["approval"])).pendingApproval!!
+
+        assertEquals("region", clarify.questions.single().qid)
+        assertTrue(clarify.questions.single().multiSelect)
+        assertEquals(listOf("once", "deny"), approval.choices)
     }
 }
