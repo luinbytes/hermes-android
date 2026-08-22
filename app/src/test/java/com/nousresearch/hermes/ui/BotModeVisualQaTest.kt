@@ -111,6 +111,7 @@ class BotModeVisualQaTest {
         fontScale: Float,
         content: @Composable () -> Unit,
     ) {
+        compose.mainClock.autoAdvance = false
         compose.setContent {
             CompositionLocalProvider(LocalDensity provides Density(1f, fontScale)) {
                 HermesTheme(skin = skin, darkTheme = true) {
@@ -118,7 +119,7 @@ class BotModeVisualQaTest {
                 }
             }
         }
-        compose.waitForIdle()
+        compose.mainClock.advanceTimeBy(100)
         compose.onNodeWithText("Bots").assertExists()
         val image = compose.onNodeWithTag(QA_ROOT).captureToImage().asAndroidBitmap()
         assertTrue("QA frame height changed", image.height == height)
