@@ -8,6 +8,7 @@ import com.nousresearch.hermes.network.DashboardSessionCredential
 import com.nousresearch.hermes.network.HermesRestClient
 import com.nousresearch.hermes.domain.TimelineItem
 import com.nousresearch.hermes.protocol.BotGroupSnapshot
+import com.nousresearch.hermes.protocol.BotGroupMember
 import com.nousresearch.hermes.protocol.GatewayConnectionState
 import com.nousresearch.hermes.protocol.GatewayEvent
 import com.nousresearch.hermes.protocol.HermesGatewayClient
@@ -17,8 +18,10 @@ import com.nousresearch.hermes.platform.newCameraCaptureUri
 import java.io.File
 import java.io.IOException
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -42,6 +45,7 @@ import okhttp3.mockwebserver.SocketPolicy
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -169,7 +173,9 @@ class HermesRepositoryBillingTest {
             assertEquals(current.id, repository.state.value.backend?.id)
             assertEquals(listOf(remote.id), scoped.connectedBackendIds)
             assertTrue(scoped.requests.any { it.method == "profiles.create" })
-            assertTrue(scoped.requests.any { it.method == "prompt.submit" })
+            val intro = scoped.requests.single { it.method == "prompt.submit" }.params.toString()
+            assertTrue(intro.contains("\"text\""))
+            assertFalse(intro.contains("\"message\""))
             assertFalse(gateway.requests.any { it.method == "profiles.create" })
         }
     }
@@ -258,13 +264,252 @@ class HermesRepositoryBillingTest {
             val result = repository.botGroupCandidates()
 
             assertEquals(
-                listOf("coder-cloud-box", "coder-cloud-box-2", "coder-personal"),
+                listOf(current, remote, remoteTwin).map { "coder-${it.id.take(8)}" }.sorted(),
                 result.candidates.map { it.handle }.sorted(),
             )
             assertEquals(result.candidates.size, result.candidates.map { it.handle.lowercase() }.toSet().size)
             assertEquals(result.candidates, repository.state.value.botCandidates)
             assertEquals(current.id, repository.state.value.backend?.id)
             assertEquals(listOf(remote.id, remoteTwin.id), scoped.connectedBackendIds)
+        }
+    }
+
+    @Test
+    fun `bot roster retains only the failed sources last known rows as offline`() = runBlocking {
+        MockWebServer().use { server ->
+            server.dispatcher = readyDashboardDispatcher()
+            server.start()
+            val context = RuntimeEnvironment.getApplication()
+            val current = backend(server).copy(id = "personal", label = "Personal")
+            val remote = current.copy(id = "cloud", label = "Cloud")
+            val registry = BackendRegistry(context, json)
+            val credentials = InMemoryCredentialStore()
+            val gateway = RecordingGateway(json)
+            val scoped = RecordingGateway(json)
+            gateway.forkedGateway = scoped
+            registry.save(current)
+            registry.save(remote)
+            registry.select(current.id)
+            credentials.put(current.id, SESSION_COOKIE)
+            credentials.put(remote.id, SESSION_COOKIE)
+            val repository = repository(context, registry, credentials, BillingPendingChargeStore(context, json), gateway)
+            awaitReady(repository, current.id)
+            gateway.enqueue("profiles.list", json.parseToJsonElement("""{"profiles":[{"name":"coder"}]}"""))
+            scoped.enqueue("profiles.list", json.parseToJsonElement("""{"profiles":[{"name":"reviewer"}]}"""))
+            val initial = repository.botGroupCandidates()
+            gateway.enqueue("profiles.list", json.parseToJsonElement("""{"profiles":[{"name":"coder"}]}"""))
+            scoped.enqueueFailure("profiles.list", IOException("cloud offline"))
+
+            val refreshed = repository.botGroupCandidates()
+
+            assertTrue("Cloud" in refreshed.unavailableSources)
+            assertFalse(refreshed.candidates.single { it.backendId == current.id }.offline)
+            assertTrue(refreshed.candidates.single { it.backendId == remote.id }.offline)
+            assertEquals("reviewer", refreshed.candidates.single { it.backendId == remote.id }.profile.name)
+            assertEquals(
+                initial.candidates.single { it.backendId == remote.id }.handle,
+                refreshed.candidates.single { it.backendId == remote.id }.handle,
+            )
+            val offlineGroup = runCatching {
+                repository.createBotGroup(
+                    "Unsafe",
+                    listOf(
+                        BotGroupMember("coder", "coder", current.id),
+                        BotGroupMember("reviewer", "reviewer", remote.id),
+                    ),
+                )
+            }.exceptionOrNull()
+            assertTrue(offlineGroup is IllegalArgumentException)
+            scoped.enqueue(
+                "profiles.configure",
+                json.parseToJsonElement("""{"applied":{"ui_meta":true}}"""),
+            )
+            gateway.enqueue("profiles.list", json.parseToJsonElement("""{"profiles":[{"name":"coder"}]}"""))
+            scoped.enqueue(
+                "profiles.list",
+                json.parseToJsonElement(
+                    """{"profiles":[{"name":"reviewer","ui_meta":{"hermes-bots":{"hidden":true}}}]}""",
+                ),
+            )
+
+            repository.setBotHidden("reviewer", hidden = true, backendId = remote.id)
+
+            assertEquals(current.id, repository.state.value.backend?.id)
+            assertTrue(scoped.requests.any { it.method == "profiles.configure" })
+            assertTrue(repository.state.value.botCandidates.single { it.backendId == remote.id }.profile.uiMeta.toString().contains("hidden"))
+        }
+    }
+
+    @Test
+    fun `forgotten source cannot republish an in flight bot roster result`() = runBlocking {
+        MockWebServer().use { server ->
+            server.dispatcher = readyDashboardDispatcher()
+            server.start()
+            val context = RuntimeEnvironment.getApplication()
+            val current = backend(server).copy(id = "personal", label = "Personal")
+            val remote = current.copy(id = "cloud", label = "Cloud")
+            val registry = BackendRegistry(context, json)
+            val credentials = InMemoryCredentialStore()
+            val gateway = RecordingGateway(json)
+            val scoped = RecordingGateway(json)
+            gateway.forkedGateway = scoped
+            registry.save(current)
+            registry.save(remote)
+            registry.select(current.id)
+            credentials.put(current.id, SESSION_COOKIE)
+            credentials.put(remote.id, SESSION_COOKIE)
+            val repository = repository(context, registry, credentials, BillingPendingChargeStore(context, json), gateway)
+            awaitReady(repository, current.id)
+            gateway.enqueue("profiles.list", json.parseToJsonElement("""{"profiles":[{"name":"coder"}]}"""))
+            val remoteStarted = CompletableDeferred<Unit>()
+            val remoteResult = CompletableDeferred<JsonElement>()
+            scoped.enqueueBlock("profiles.list") {
+                remoteStarted.complete(Unit)
+                remoteResult.await()
+            }
+
+            val refresh = async { repository.botGroupCandidates() }
+            remoteStarted.await()
+            repository.forgetBackend(remote.id)
+            remoteResult.complete(json.parseToJsonElement("""{"profiles":[{"name":"reviewer"}]}"""))
+            val result = refresh.await()
+
+            assertTrue(result.candidates.none { it.backendId == remote.id })
+            assertTrue(repository.state.value.botCandidates.none { it.backendId == remote.id })
+            assertNull(credentials.get(remote.id))
+        }
+    }
+
+    @Test
+    fun `disconnect and forget invalidates an in flight active bot roster`() = runBlocking {
+        MockWebServer().use { server ->
+            server.dispatcher = readyDashboardDispatcher()
+            server.start()
+            val context = RuntimeEnvironment.getApplication()
+            val backend = backend(server).copy(id = "active-forget", label = "Active")
+            val registry = BackendRegistry(context, json)
+            val credentials = InMemoryCredentialStore()
+            val gateway = RecordingGateway(json)
+            registry.save(backend)
+            credentials.put(backend.id, SESSION_COOKIE)
+            val repository = repository(context, registry, credentials, BillingPendingChargeStore(context, json), gateway)
+            awaitReady(repository, backend.id)
+            val requestStarted = CompletableDeferred<Unit>()
+            val response = CompletableDeferred<JsonElement>()
+            gateway.enqueueBlock("profiles.list") {
+                requestStarted.complete(Unit)
+                response.await()
+            }
+
+            val refresh = async { repository.botGroupCandidates() }
+            requestStarted.await()
+            repository.disconnectAndForget()
+            response.complete(json.parseToJsonElement("""{"profiles":[{"name":"stale"}]}"""))
+            val result = refresh.await()
+
+            assertTrue(result.candidates.none { it.backendId == backend.id })
+            assertTrue(repository.state.value.botCandidates.none { it.backendId == backend.id })
+            assertNull(credentials.get(backend.id))
+        }
+    }
+
+    @Test
+    fun `remote bot chat uses only its source and preserves the active backend`() = runBlocking {
+        MockWebServer().use { server ->
+            server.dispatcher = readyDashboardDispatcher()
+            server.start()
+            val context = RuntimeEnvironment.getApplication()
+            val current = backend(server).copy(id = "personal-chat", label = "Personal")
+            val remote = current.copy(id = "cloud-chat", label = "Cloud")
+            val registry = BackendRegistry(context, json)
+            val credentials = InMemoryCredentialStore()
+            val gateway = RecordingGateway(json)
+            val scoped = RecordingGateway(json)
+            gateway.forkedGateway = scoped
+            registry.save(current)
+            registry.save(remote)
+            registry.select(current.id)
+            credentials.put(current.id, SESSION_COOKIE)
+            credentials.put(remote.id, SESSION_COOKIE)
+            val repository = repository(context, registry, credentials, BillingPendingChargeStore(context, json), gateway)
+            awaitReady(repository, current.id)
+            scoped.enqueue(
+                "session.list",
+                json.parseToJsonElement("""{"sessions":[{"id":"remote-bot","title":"Bot Chat"}]}"""),
+            )
+            scoped.enqueue(
+                "session.resume",
+                json.parseToJsonElement(
+                    """{"session_id":"remote-live","session_key":"remote-bot","messages":[{"role":"assistant","content":"Earlier"}]}""",
+                ),
+            )
+            scoped.enqueue("prompt.submit", json.parseToJsonElement("""{"status":"streaming"}"""))
+            scoped.enqueue(
+                "session.resume",
+                checkNotNull(javaClass.getResource("/fixtures/bot-direct-chat-resume-64e5d89.json"))
+                    .readText().let(json::parseToJsonElement),
+            )
+
+            val chat = repository.botDirectChat(remote.id, "reviewer", "Status?")
+
+            assertEquals(listOf("Earlier", "Status?", "Green."), chat.messages.map { it.text })
+            assertEquals(current.id, repository.state.value.backend?.id)
+            assertTrue(gateway.requests.none { it.method in setOf("session.list", "session.resume", "prompt.submit") })
+            assertEquals(remote.id, scoped.connectedBackendIds.single())
+            val submit = scoped.requests.single { it.method == "prompt.submit" }.params.toString()
+            assertTrue(submit.contains("\"text\":\"Status?\""))
+            assertFalse(submit.contains("\"message\""))
+        }
+    }
+
+    @Test
+    fun `remote bot chat creation titles legacy sessions and busy loads return immediately`() = runBlocking {
+        MockWebServer().use { server ->
+            server.dispatcher = readyDashboardDispatcher()
+            server.start()
+            val context = RuntimeEnvironment.getApplication()
+            val current = backend(server).copy(id = "personal-direct", label = "Personal")
+            val remote = current.copy(id = "cloud-direct", label = "Cloud")
+            val registry = BackendRegistry(context, json)
+            val credentials = InMemoryCredentialStore()
+            val gateway = RecordingGateway(json)
+            val scoped = RecordingGateway(json)
+            gateway.forkedGateway = scoped
+            registry.save(current)
+            registry.save(remote)
+            registry.select(current.id)
+            credentials.put(current.id, SESSION_COOKIE)
+            credentials.put(remote.id, SESSION_COOKIE)
+            val repository = repository(context, registry, credentials, BillingPendingChargeStore(context, json), gateway)
+            awaitReady(repository, current.id)
+            scoped.enqueue("session.list", json.parseToJsonElement("""{"sessions":[]}"""))
+            scoped.enqueue(
+                "session.create",
+                json.parseToJsonElement("""{"session_id":"new-live","stored_session_id":"new-bot","messages":[]}"""),
+            )
+            scoped.enqueueFailure("session.title", HermesRpcException("Method not found", -32601))
+            scoped.enqueue("prompt.submit", json.parseToJsonElement("""{"status":"streaming"}"""))
+
+            assertTrue(repository.botDirectChat(remote.id, "reviewer").messages.isEmpty())
+            assertTrue(scoped.requests.single { it.method == "session.title" }.params.toString().contains("Bot Chat"))
+            val intro = scoped.requests.single { it.method == "prompt.submit" }.params.toString()
+            assertTrue(intro.contains("\"text\""))
+            assertFalse(intro.contains("\"message\""))
+            scoped.enqueue(
+                "session.list",
+                json.parseToJsonElement("""{"sessions":[{"id":"new-bot","title":"Bot Chat"}]}"""),
+            )
+            scoped.enqueue(
+                "session.resume",
+                json.parseToJsonElement(
+                    """{"session_id":"new-live","session_key":"new-bot","running":true,"messages":[{"role":"assistant","content":"Working"}]}""",
+                ),
+            )
+
+            val busy = withTimeout(1_000) { repository.botDirectChat(remote.id, "reviewer") }
+
+            assertEquals(listOf("Working"), busy.messages.map { it.text })
+            assertEquals(current.id, repository.state.value.backend?.id)
         }
     }
 
@@ -2692,7 +2937,7 @@ private class RecordingGateway(
     private val mutableEvents = MutableSharedFlow<GatewayEvent>(extraBufferCapacity = 8)
     private val responses = mutableMapOf<String, ArrayDeque<suspend () -> JsonElement>>()
     private var blockedReconnect: BlockedReconnect? = null
-    val requests = mutableListOf<RecordedGatewayRequest>()
+    val requests = CopyOnWriteArrayList<RecordedGatewayRequest>()
     val connectedBackendIds = mutableListOf<String>()
     var forkedGateway: RecordingGateway? = null
 

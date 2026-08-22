@@ -328,6 +328,14 @@ data class BotAgentDraft(
     val enabledMcpServers: Set<String> = emptySet(),
 )
 
+data class BotDirectMessage(
+    val id: String,
+    val role: String,
+    val text: String,
+)
+
+data class BotDirectChat(val messages: List<BotDirectMessage>)
+
 data class EntryAuthoritySnapshot(
     val profileIds: Set<String>,
     val cronJobIds: Set<String>,
@@ -454,6 +462,10 @@ class HermesRepository @Inject constructor(
     private val sessionListRefreshPriorityMutex = Mutex()
     private val backendCredentialGeneration = AtomicLong()
     private val profileRefreshGeneration = AtomicLong()
+    private val botRosterRefreshGeneration = AtomicLong()
+    private val botRosterCredentialGenerations = ConcurrentHashMap<String, AtomicLong>()
+    private val botRosterCache = ConcurrentHashMap<String, List<ProfileInfo>>()
+    private val botRosterMutex = Mutex()
     private val canonicalChatMutexes = ConcurrentHashMap<BotProfileKey, Mutex>()
     private val pendingBotCreations = ConcurrentHashMap.newKeySet<BotProfileKey>()
     private val botGroupMutex = Mutex()
@@ -494,6 +506,11 @@ class HermesRepository @Inject constructor(
             combine(backendRegistry.backends, backendRegistry.activeBackendId) { backends, activeId ->
                 backends to backends.firstOrNull { it.id == activeId }
             }.collectLatest { (backends, backend) ->
+                botRosterMutex.withLock {
+                    val savedIds = backends.mapTo(mutableSetOf(), BackendConfig::id)
+                    botRosterCache.keys.retainAll(savedIds)
+                    botRosterCredentialGenerations.keys.retainAll(savedIds)
+                }
                 billingAccountMutex.withLock {
                     if (backend == null) {
                         mutableStartupReady.value = true
@@ -645,6 +662,7 @@ class HermesRepository @Inject constructor(
             )
             try {
                 val status = dashboardConnector.loginValidateAndSave(config, username, password, passwordProvider)
+                invalidateBotRoster(config.id)
                 val saved = config.copy(lastHermesVersion = status.hermesVersion ?: status.version)
                 connect(saved)
                 status
@@ -1298,6 +1316,111 @@ class HermesRepository @Inject constructor(
             ) return@withLock false
             send(BOT_CHAT_INTRO)
             mutableState.value.error == null
+        }
+    }
+
+    suspend fun botDirectChat(
+        backendId: String,
+        profileName: String,
+        prompt: String? = null,
+    ): BotDirectChat {
+        val profile = profileName.trim()
+        val message = prompt?.trim()
+        require(profile.isNotEmpty()) { "Hermes profile is required" }
+        require(prompt == null || !message.isNullOrEmpty()) { "Message is required" }
+        return withBotGateway(backendId) { client, _ ->
+            val existing = client.request(
+                "session.list",
+                buildJsonObject {
+                    put("profile", profile)
+                    put("title", BOT_CHAT_TITLE)
+                    put("limit", 200)
+                    put("include_hidden", true)
+                },
+            ).let { json.decodeFromJsonElement(BotSessionPage.serializer(), it) }
+                .sessions.firstOrNull(BotSessionSummary::isCanonicalBotChat)
+            val created = if (existing == null) {
+                client.request(
+                    "session.create",
+                    buildJsonObject {
+                        put("profile", profile)
+                        put("title", BOT_CHAT_TITLE)
+                        put("hidden", true)
+                    },
+                ).let { json.decodeFromJsonElement(SessionCreateResult.serializer(), it) }
+            } else {
+                null
+            }
+            val durableId = existing?.let { it.resolvedId ?: it.id }
+                ?: created?.durableSessionId
+                ?: created?.runtimeSessionId
+                ?: error("Hermes did not return the Bot Chat")
+            var resumed = if (created == null) {
+                client.request(
+                    "session.resume",
+                    buildJsonObject { put("session_id", durableId); put("profile", profile) },
+                ).let { json.decodeFromJsonElement(SessionResumeResult.serializer(), it) }
+            } else {
+                SessionResumeResult(
+                    runtimeSessionId = created.runtimeSessionId,
+                    durableSessionId = created.durableSessionId,
+                    messages = created.messages,
+                    running = created.running,
+                )
+            }
+            suspend fun waitUntilIdle(before: Int, requireNewMessage: Boolean): SessionResumeResult {
+                val deadline = System.currentTimeMillis() + 180_000
+                while (
+                    resumed.running || resumed.inflight != null ||
+                    (requireNewMessage && resumed.messages.size <= before)
+                ) {
+                    if (System.currentTimeMillis() >= deadline) {
+                        throw IllegalStateException("${profile.replaceFirstChar(Char::uppercase)} is still working; try again shortly")
+                    }
+                    delay(1_000)
+                    resumed = client.request(
+                        "session.resume",
+                        buildJsonObject { put("session_id", durableId); put("profile", profile) },
+                    ).let { json.decodeFromJsonElement(SessionResumeResult.serializer(), it) }
+                }
+                return resumed
+            }
+            if (created != null) {
+                try {
+                    client.request(
+                        "session.title",
+                        buildJsonObject {
+                            put("session_id", created.runtimeSessionId)
+                            put("title", BOT_CHAT_TITLE)
+                        },
+                    )
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (error: HermesRpcException) {
+                    if (error.rpcCode != -32601) throw error
+                }
+                client.request(
+                    "prompt.submit",
+                    buildJsonObject { put("session_id", created.runtimeSessionId); put("text", BOT_CHAT_INTRO) },
+                )
+            } else if (message != null) {
+                resumed = waitUntilIdle(resumed.messages.size, requireNewMessage = false)
+            }
+            if (message != null) {
+                val before = resumed.messages.size
+                client.request(
+                    "prompt.submit",
+                    buildJsonObject { put("session_id", resumed.runtimeSessionId); put("text", message) },
+                )
+                resumed = waitUntilIdle(before, requireNewMessage = true)
+            }
+            BotDirectChat(
+                resumed.messages.mapIndexedNotNull { index, entry ->
+                    entry.botGroupText().takeIf(String::isNotBlank)?.let { text ->
+                        BotDirectMessage(entry.id ?: "$durableId:$index", entry.role, text)
+                    }
+                }.filter { it.role == "user" || it.role == "assistant" }.takeLast(40),
+            )
         }
     }
 
@@ -2496,22 +2619,33 @@ class HermesRepository @Inject constructor(
         }
     }
 
-    suspend fun setBotHidden(profileName: String, hidden: Boolean) {
-        val profile = mutableState.value.profiles.firstOrNull { it.name == profileName }
+    suspend fun setBotHidden(
+        profileName: String,
+        hidden: Boolean,
+        backendId: String = mutableState.value.backend?.id.orEmpty(),
+    ) {
+        val profile = if (backendId == mutableState.value.backend?.id) {
+            mutableState.value.profiles.firstOrNull { it.name == profileName }
+        } else {
+            mutableState.value.botCandidates.firstOrNull {
+                it.backendId == backendId && it.profile.name == profileName
+            }?.profile
+        }
             ?: throw IllegalArgumentException("Unknown Hermes profile")
         runCatching {
-            val response = gateway.request(
-                "profiles.configure",
-                botHiddenConfigureParams(profile, hidden),
-            )
+            val response = withBotGateway(backendId) { client, _ ->
+                client.request("profiles.configure", botHiddenConfigureParams(profile, hidden))
+            }
             require(
                 response.jsonObject["applied"]?.jsonObject?.get("ui_meta")?.jsonPrimitive?.booleanOrNull == true,
             ) { "Hermes did not save the Bot visibility change; refresh and try again" }
-            refreshProfiles()
+            if (backendId == mutableState.value.backend?.id) refreshProfiles()
+            botGroupCandidates()
         }.onFailure(::fail)
     }
 
     suspend fun createBotGroup(name: String, members: List<BotGroupMember>): BotGroupRoom {
+        require(members.none(::isOfflineBotGroupMember)) { "Reconnect offline Bot sources before adding their agents" }
         val created = newBotGroupRoom(name, members, System.currentTimeMillis())
         mutateBotGroups { snapshot ->
             val taken = snapshot.visibleRooms().mapTo(mutableSetOf()) { it.name.lowercase() }
@@ -2524,53 +2658,95 @@ class HermesRepository @Inject constructor(
     }
 
     suspend fun botGroupCandidates(): BotGroupCandidateResult {
-        val sources = mutableListOf<Pair<BackendConfig, ProfileInfo>>()
+        val refreshGeneration = botRosterRefreshGeneration.incrementAndGet()
+        val backends = mutableState.value.savedBackends
+        val credentialGenerations = backends.associate { backend ->
+            backend.id to botRosterCredentialGenerations.getOrPut(backend.id) { AtomicLong() }.get()
+        }
+        val profilesByBackend = linkedMapOf<String, List<ProfileInfo>>()
         val unavailable = mutableListOf<String>()
-        for (backend in mutableState.value.savedBackends) {
+        val unavailableIds = mutableSetOf<String>()
+        for (backend in backends) {
             try {
                 withBotGateway(backend.id) { client, source ->
-                    client.request("profiles.list", buildJsonObject { put("include_sessions", false) })
+                    profilesByBackend[source.id] = client.request(
+                        "profiles.list",
+                        buildJsonObject { put("include_sessions", true) },
+                    )
                         .let { json.decodeFromJsonElement(ProfilesResponse.serializer(), it) }
-                        .profiles.forEach { profile -> sources += source to profile }
+                        .profiles
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (_: Throwable) {
                 unavailable += backend.label
+                unavailableIds += backend.id
+                botRosterCache[backend.id]?.let { profilesByBackend[backend.id] = it }
             }
         }
-        val baseNames = sources.map { botMentionBaseHandle(it.second) }
-        val repeatedNames = baseNames.groupingBy(String::lowercase).eachCount()
-        val baseHandles = sources.map { (backend, profile) ->
-            val baseName = botMentionBaseHandle(profile)
-            if (repeatedNames[baseName.lowercase()] == 1) {
-                baseName
-            } else {
-                "$baseName-${backend.label.lowercase().replace(Regex("[^a-z0-9]+"), "-").trim('-').ifBlank { backend.id.take(8) }}"
+        return botRosterMutex.withLock {
+            if (
+                botRosterRefreshGeneration.get() != refreshGeneration ||
+                mutableState.value.savedBackends.map(BackendConfig::id) != backends.map(BackendConfig::id) ||
+                credentialGenerations.any { (id, generation) ->
+                    botRosterCredentialGenerations[id]?.get() != generation
+                }
+            ) {
+                val current = mutableState.value.botCandidates
+                return@withLock BotGroupCandidateResult(
+                    current,
+                    current.filter(BotGroupCandidate::offline).map { it.backendLabel }.distinct(),
+                )
             }
+            backends.filterNot { it.id in unavailableIds }.forEach { backend ->
+                profilesByBackend[backend.id]?.let { botRosterCache[backend.id] = it }
+            }
+            val sources = backends.flatMap { backend ->
+                profilesByBackend[backend.id].orEmpty().map { profile -> backend to profile }
+            }
+            val baseNames = sources.map { botMentionBaseHandle(it.second) }
+            val repeatedNames = baseNames.groupingBy(String::lowercase).eachCount()
+            val baseHandles = sources.map { (backend, profile) ->
+                val baseName = botMentionBaseHandle(profile)
+                if (repeatedNames[baseName.lowercase()] == 1) baseName else "$baseName-${backend.id.take(8).lowercase()}"
+            }
+            val usedHandles = mutableSetOf<String>()
+            val candidates = sources.indices.sortedWith(
+                compareBy<Int> { sources[it].first.id }.thenBy { sources[it].second.name.lowercase() },
+            ).map { index ->
+                val (backend, profile) = sources[index]
+                val base = baseHandles[index].take(128)
+                var handle = base
+                var suffix = 2
+                while (!usedHandles.add(handle.lowercase())) {
+                    val ending = "-${suffix++}"
+                    handle = base.take(128 - ending.length).trimEnd('-') + ending
+                }
+                BotGroupCandidate(profile, backend.id, backend.label, handle, backend.id in unavailableIds)
+            }.sortedWith(compareBy<BotGroupCandidate> { it.profile.name.lowercase() }.thenBy { it.backendLabel.lowercase() })
+            mutableState.value = mutableState.value.copy(botCandidates = candidates)
+            BotGroupCandidateResult(candidates, unavailable.distinct())
         }
-        val usedHandles = mutableSetOf<String>()
-        val candidates = sources.indices.sortedWith(
-            compareBy<Int> { sources[it].first.id }.thenBy { sources[it].second.name.lowercase() },
-        ).map { index ->
-            val (backend, profile) = sources[index]
-            val base = baseHandles[index].take(128)
-            var handle = base
-            var suffix = 2
-            while (!usedHandles.add(handle.lowercase())) {
-                val ending = "-${suffix++}"
-                handle = base.take(128 - ending.length).trimEnd('-') + ending
-            }
-            BotGroupCandidate(profile, backend.id, backend.label, handle)
-        }.sortedWith(compareBy<BotGroupCandidate> { it.profile.name.lowercase() }.thenBy { it.backendLabel.lowercase() })
-        mutableState.value = mutableState.value.copy(botCandidates = candidates)
-        return BotGroupCandidateResult(candidates, unavailable)
+    }
+
+    private suspend fun invalidateBotRoster(backendId: String) {
+        botRosterMutex.withLock {
+            botRosterCredentialGenerations.getOrPut(backendId) { AtomicLong() }.incrementAndGet()
+            botRosterCache.remove(backendId)
+            mutableState.value = mutableState.value.copy(
+                botCandidates = mutableState.value.botCandidates.filterNot { it.backendId == backendId },
+            )
+        }
     }
 
     suspend fun updateBotGroup(room: BotGroupRoom): BotGroupRoom {
         require(room.roomId.isNotBlank()) { "Group identity is required" }
         val prior = mutableState.value.botGroups.rooms.firstOrNull { it.roomId == room.roomId }
             ?: throw IllegalArgumentException("Unknown Bot group")
+        val priorMembers = prior.members.mapTo(mutableSetOf(), ::botGroupMemberKey)
+        require(room.members.none { botGroupMemberKey(it) !in priorMembers && isOfflineBotGroupMember(it) }) {
+            "Reconnect offline Bot sources before adding their agents"
+        }
         var saved = room
         mutateBotGroups { snapshot ->
             val current = snapshot.visibleRooms().firstOrNull { it.roomId == room.roomId }
@@ -2592,6 +2768,11 @@ class HermesRepository @Inject constructor(
         }
         return saved
     }
+
+    private fun isOfflineBotGroupMember(member: BotGroupMember): Boolean =
+        mutableState.value.botCandidates.any {
+            it.offline && it.backendId == member.connectionId && it.profile.name == member.name
+        }
 
     suspend fun disbandBotGroup(roomId: String) {
         botGroupRuns.getOrPut(roomId, ::AtomicLong).incrementAndGet()
@@ -3370,7 +3551,7 @@ class HermesRepository @Inject constructor(
             "prompt.submit",
             buildJsonObject {
                 put("session_id", runtimeId)
-                put("message", BOT_CHAT_INTRO)
+                put("text", BOT_CHAT_INTRO)
             },
         )
         return true
@@ -3408,6 +3589,17 @@ class HermesRepository @Inject constructor(
             put("asset", "avatar")
         },
     ).let { json.decodeFromJsonElement(ProfileAsset.serializer(), it) }
+
+    suspend fun botProfileAvatar(backendId: String, profileName: String): ProfileAsset =
+        withBotGateway(backendId) { client, _ ->
+            client.request(
+                "profiles.get_asset",
+                buildJsonObject {
+                    put("name", profileName.trim())
+                    put("asset", "avatar")
+                },
+            ).let { json.decodeFromJsonElement(ProfileAsset.serializer(), it) }
+        }
 
     suspend fun setProfileAvatar(profileName: String, dataUrl: String?) {
         val response = gateway.request(
@@ -6109,6 +6301,7 @@ class HermesRepository @Inject constructor(
                 gatewayBackendId = null
                 tokenStore.remove(backend.id)
                 backendRegistry.remove(backend.id)
+                invalidateBotRoster(backend.id)
             } finally {
                 mutableState.value = mutableState.value.copy(backendTransitionInProgress = false)
             }
@@ -6158,6 +6351,7 @@ class HermesRepository @Inject constructor(
                 billingPendingChargeStore.remove(id)
                 tokenStore.remove(id)
                 backendRegistry.remove(id)
+                invalidateBotRoster(id)
             } finally {
                 if (active) mutableState.value = mutableState.value.copy(backendTransitionInProgress = false)
             }

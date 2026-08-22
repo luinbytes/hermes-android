@@ -95,6 +95,7 @@ data class BotGroupCandidate(
     val backendId: String,
     val backendLabel: String,
     val handle: String,
+    val offline: Boolean = false,
 )
 
 data class BotGroupCandidateResult(
