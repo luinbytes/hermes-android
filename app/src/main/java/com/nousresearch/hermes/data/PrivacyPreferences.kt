@@ -47,7 +47,7 @@ class PrivacyPreferences internal constructor(
         .catch { emit(true) }
 
     val botModeEnabled: Flow<Boolean> = store.data
-        .map { it[BOT_MODE_ENABLED] ?: false }
+        .map { it[BOT_MODE_ENABLED] ?: true }
         .catch { emit(false) }
 
     val skin: Flow<HermesSkin> = store.data

@@ -78,15 +78,18 @@ class MainActivity : ComponentActivity() {
             }
             val biometricReentry by biometricReentryFlow.collectAsStateWithLifecycle(initialValue = null)
             val skin by privacyPreferences.skin.collectAsStateWithLifecycle(initialValue = HermesSkin.NOUS)
-            val botModeEnabled by privacyPreferences.botModeEnabled.collectAsStateWithLifecycle(initialValue = false)
+            val botModeEnabledFlow = remember {
+                privacyPreferences.botModeEnabled.map<Boolean, Boolean?> { it }
+            }
+            val botModeEnabled by botModeEnabledFlow.collectAsStateWithLifecycle(initialValue = null)
             val entryRequests by entryRequestStore.deliveries.collectAsStateWithLifecycle()
             val biometricAvailable = authenticationAvailable()
             val locked = biometricReentry == true && privacyGate.isLocked(enabled = true)
             ReportDrawnWhen {
-                biometricReentry != null && (locked || workspaceReady)
+                biometricReentry != null && botModeEnabled != null && (locked || workspaceReady)
             }
             when {
-                biometricReentry == null -> HermesTheme(skin) { }
+                biometricReentry == null || botModeEnabled == null -> HermesTheme(skin) { }
                 locked -> {
                     HermesTheme(skin) {
                         BiometricLockScreen(privacyGate.error, ::authenticate, ::useDeviceCredential)
@@ -110,7 +113,7 @@ class MainActivity : ComponentActivity() {
                     onSkinChange = { selected ->
                         lifecycleScope.launch { privacyPreferences.setSkin(selected) }
                     },
-                    botModeEnabled = botModeEnabled,
+                    botModeEnabled = botModeEnabled == true,
                     onBotModeEnabledChange = { enabled ->
                         lifecycleScope.launch { privacyPreferences.setBotModeEnabled(enabled) }
                     },
