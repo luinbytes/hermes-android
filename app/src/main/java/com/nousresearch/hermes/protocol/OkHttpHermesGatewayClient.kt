@@ -45,6 +45,8 @@ class OkHttpHermesGatewayClient @Inject constructor(
     override val connectionState = mutableConnectionState.asStateFlow()
     override val events = mutableEvents.asSharedFlow()
 
+    override fun fork(): HermesGatewayClient = OkHttpHermesGatewayClient(client, json, authClient)
+
     override suspend fun connect(config: BackendConfig, token: String) {
         require(config.authMode != AuthMode.DASHBOARD_SESSION) { "Dashboard sessions require a single-use WebSocket ticket" }
         connect(gatewayUrl(config, "token", token))

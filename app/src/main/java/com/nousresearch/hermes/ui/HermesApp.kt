@@ -211,6 +211,7 @@ import com.nousresearch.hermes.data.DiagnosticAction
 import com.nousresearch.hermes.data.PendingAttachment
 import com.nousresearch.hermes.data.AttachmentPhase
 import com.nousresearch.hermes.data.ProfileIdentityDraft
+import com.nousresearch.hermes.data.BotAgentDraft
 import com.nousresearch.hermes.data.SlashSuggestion
 import com.nousresearch.hermes.data.normalizedProfile
 import com.nousresearch.hermes.data.isActiveCanonicalBotChat
@@ -227,6 +228,9 @@ import com.nousresearch.hermes.domain.presentation
 import com.nousresearch.hermes.protocol.GatewayConnectionState
 import com.nousresearch.hermes.protocol.SessionSearchHit
 import com.nousresearch.hermes.protocol.StoredSession
+import com.nousresearch.hermes.protocol.ProfileAsset
+import com.nousresearch.hermes.protocol.ProfileDescription
+import com.nousresearch.hermes.protocol.PetGallery
 import com.nousresearch.hermes.platform.HermesEntryDelivery
 import com.nousresearch.hermes.platform.HermesEntryRequest
 import com.nousresearch.hermes.platform.newCameraCaptureUri
@@ -330,7 +334,14 @@ private data class ManagementActions(
     val refreshProfiles: () -> Unit,
     val refreshBotRoster: () -> Unit,
     val setBotHidden: (String, Boolean) -> Unit,
-    val createProfile: (String, String, Boolean, Boolean) -> Unit,
+    val describeBotAgent: suspend (String) -> ProfileDescription,
+    val createBotAgent: suspend (BotAgentDraft, String, String?, Boolean, Boolean, Boolean) -> Boolean,
+    val configureBotAgent: suspend (BotAgentDraft) -> Unit,
+    val profileAvatar: suspend (String) -> ProfileAsset,
+    val setProfileAvatar: suspend (String, String?) -> Unit,
+    val generateProfileAvatar: suspend (String, String) -> String,
+    val profilePetGallery: suspend (String) -> PetGallery,
+    val adoptProfilePet: suspend (String, String) -> String,
     val renameProfile: (String, String) -> Unit,
     val setActiveProfile: (String) -> Unit,
     val deleteProfile: (String) -> Unit,
@@ -473,7 +484,14 @@ fun HermesApp(
             refreshProfiles = viewModel::refreshProfiles,
             refreshBotRoster = viewModel::refreshBotRoster,
             setBotHidden = viewModel::setBotHidden,
-            createProfile = viewModel::createProfile,
+            describeBotAgent = viewModel::describeBotAgent,
+            createBotAgent = viewModel::createBotAgent,
+            configureBotAgent = viewModel::configureBotAgent,
+            profileAvatar = viewModel::profileAvatar,
+            setProfileAvatar = viewModel::setProfileAvatar,
+            generateProfileAvatar = viewModel::generateProfileAvatar,
+            profilePetGallery = viewModel::profilePetGallery,
+            adoptProfilePet = viewModel::adoptProfilePet,
             renameProfile = viewModel::renameProfile,
             setActiveProfile = viewModel::setActiveProfile,
             deleteProfile = viewModel::deleteProfile,
@@ -1183,6 +1201,7 @@ private fun HermesWorkspace(
         var expandedToolIds by remember(backendId, profileId, supportingSessionId) {
             mutableStateOf(emptyList<String>())
         }
+        var requestedProfileEditor by rememberSaveable(backendId) { mutableStateOf<String?>(null) }
         val timelineTools = state.timeline.items.filterIsInstance<TimelineItem.Tool>()
         val availableToolIds = timelineTools.mapTo(mutableSetOf()) { it.id }
         val supportingTool = timelineTools.firstOrNull { it.id == supportingToolId }
@@ -1222,6 +1241,13 @@ private fun HermesWorkspace(
             sessionActions.openBotChat(bot.profile.name) { session ->
                 session?.let(openStoredSession)
             }
+        }
+        val openProfiles = {
+            navigator.openManage(backendId, profileId, ManageSection.PROFILES_AND_MODELS, ManageDestination.PROFILES)
+        }
+        val editBot: (String) -> Unit = { name ->
+            requestedProfileEditor = name
+            openProfiles()
         }
         fun navigate(destination: WorkspaceContent) {
             onRecovery(null)
@@ -1433,13 +1459,29 @@ private fun HermesWorkspace(
                         state = state,
                         onRefresh = managementActions.refreshProfiles,
                         onStartSession = createConversation,
-                        onCreate = managementActions.createProfile,
                         onRename = managementActions.renameProfile,
                         onSetActive = managementActions.setActiveProfile,
                         onDelete = managementActions.deleteProfile,
                         onLoadIdentity = managementActions.profileIdentity,
                         onSaveSoul = managementActions.saveProfileSoul,
                         onSaveModel = managementActions.saveProfileModel,
+                        onDescribeAgent = managementActions.describeBotAgent,
+                        onCreateAgent = managementActions.createBotAgent,
+                        onConfigureAgent = managementActions.configureBotAgent,
+                        onLoadAvatar = managementActions.profileAvatar,
+                        onSetAvatar = managementActions.setProfileAvatar,
+                        onGenerateAvatar = managementActions.generateProfileAvatar,
+                        onLoadPets = managementActions.profilePetGallery,
+                        onAdoptPet = managementActions.adoptProfilePet,
+                        onOpenAgentChat = { name, sourceBackendId ->
+                            if (sourceBackendId == backendId) {
+                                sessionActions.openBotChat(name) { session -> session?.let(openStoredSession) }
+                            } else {
+                                navigator.openChats(backendId, profileId)
+                            }
+                        },
+                        initialEditProfile = requestedProfileEditor,
+                        onEditorConsumed = { requestedProfileEditor = null },
                         onBack = { navigator.back(backendId, profileId) },
                         modifier = Modifier.weight(1f),
                     )
@@ -1579,6 +1621,7 @@ private fun HermesWorkspace(
                             onSession = openStoredSession,
                             onBot = openBotChat,
                             onSetBotHidden = managementActions.setBotHidden,
+                            onLoadBotAvatar = managementActions.profileAvatar,
                             onDeleteSession = onDeleteSession,
                             onArchiveSession = onArchiveSession,
                             onPinSession = onPinSession,
@@ -1586,6 +1629,8 @@ private fun HermesWorkspace(
                             onArtifacts = { navigator.openArtifacts(backendId, profileId) },
                             onAutomations = { navigator.openAutomations(backendId, profileId) },
                             onManage = { navigator.openManage(backendId, profileId) },
+                            onProfiles = openProfiles,
+                            onEditBot = editBot,
                             onAppSettings = { navigator.openAppSettings() },
                             onBackends = { navigate(WorkspaceContent.BACKENDS) },
                             botModeEnabled = botModeEnabled,
@@ -1624,6 +1669,7 @@ private fun HermesWorkspace(
                         onSession = openStoredSession,
                         onBot = openBotChat,
                         onSetBotHidden = managementActions.setBotHidden,
+                        onLoadBotAvatar = managementActions.profileAvatar,
                         onDeleteSession = onDeleteSession,
                         onArchiveSession = onArchiveSession,
                         onPinSession = onPinSession,
@@ -1631,6 +1677,8 @@ private fun HermesWorkspace(
                         onArtifacts = { navigator.openArtifacts(backendId, profileId) },
                         onAutomations = { navigator.openAutomations(backendId, profileId) },
                         onManage = { navigator.openManage(backendId, profileId) },
+                        onProfiles = openProfiles,
+                        onEditBot = editBot,
                         onAppSettings = { navigator.openAppSettings() },
                         onBackends = { navigate(WorkspaceContent.BACKENDS) },
                         botModeEnabled = botModeEnabled,
@@ -1901,6 +1949,7 @@ private fun SessionRail(
     onSession: (StoredSession) -> Unit,
     onBot: (BotConversation) -> Unit,
     onSetBotHidden: (String, Boolean) -> Unit,
+    onLoadBotAvatar: suspend (String) -> ProfileAsset,
     onDeleteSession: (StoredSession) -> Unit,
     onArchiveSession: (String, StoredSession) -> Unit,
     onPinSession: (String, StoredSession) -> Unit,
@@ -1908,6 +1957,8 @@ private fun SessionRail(
     onArtifacts: () -> Unit,
     onAutomations: () -> Unit,
     onManage: () -> Unit,
+    onProfiles: () -> Unit,
+    onEditBot: (String) -> Unit,
     onAppSettings: () -> Unit,
     onBackends: () -> Unit,
     botModeEnabled: Boolean,
@@ -1923,6 +1974,7 @@ private fun SessionRail(
     var showHiddenBots by rememberSaveable(state.backend?.id) { mutableStateOf(false) }
     var activityWatermarks by remember(state.backend?.id) { mutableStateOf<Map<String, Double>>(emptyMap()) }
     var unreadProfiles by remember(state.backend?.id) { mutableStateOf<Set<String>>(emptySet()) }
+    var botAvatars by remember(state.backend?.id) { mutableStateOf<Map<String, String>>(emptyMap()) }
     val visibleSessions = state.sessions.filter { session ->
         query.isBlank() || listOf(
             session.displayTitle,
@@ -1987,6 +2039,14 @@ private fun SessionRail(
             }
             activityWatermarks = allBots.associate { it.profile.name to maxOf(activityWatermarks[it.profile.name] ?: 0.0, it.activityTimestamp) }
         }
+    }
+    LaunchedEffect(allBots.map { it.profile.name to it.profile.hasAvatar }) {
+        allBots.filter { it.profile.hasAvatar && it.profile.name !in botAvatars }.forEach { bot ->
+            runCatching { onLoadBotAvatar(bot.profile.name) }.getOrNull()?.data?.let { data ->
+                botAvatars = botAvatars + (bot.profile.name to data)
+            }
+        }
+        botAvatars = botAvatars.filterKeys { name -> allBots.any { it.profile.name == name && it.profile.hasAvatar } }
     }
     LaunchedEffect(query, inboxMode) {
         onSearchSessions(if (inboxMode == ChatInboxMode.SESSIONS) query else "")
@@ -2097,6 +2157,16 @@ private fun SessionRail(
                     contentPadding = PaddingValues(top = 8.dp, bottom = if (compact) 88.dp else 8.dp),
                 ) {
                     if (inboxMode == ChatInboxMode.BOTS) {
+                        item("bots-create") {
+                            Button(
+                                onClick = onProfiles,
+                                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+                            ) {
+                                Icon(Icons.Outlined.Add, null)
+                                Spacer(Modifier.width(6.dp))
+                                Text("New agent")
+                            }
+                        }
                         items(visibleBots, key = { "bot:${it.profile.name}" }) { bot ->
                             BotRow(
                                 bot = bot,
@@ -2106,6 +2176,8 @@ private fun SessionRail(
                                 onToggleHidden = {
                                     onSetBotHidden(bot.profile.name, !bot.hidden)
                                 },
+                                onEdit = { onEditBot(bot.profile.name) },
+                                avatarData = botAvatars[bot.profile.name],
                             )
                         }
                         if (visibleBots.isEmpty() && !state.managementLoading) {

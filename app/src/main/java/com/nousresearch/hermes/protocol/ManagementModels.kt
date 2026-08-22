@@ -2,6 +2,7 @@ package com.nousresearch.hermes.protocol
 
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 
@@ -154,6 +155,73 @@ data class ProfileInfo(
 data class ProfilesResponse(
     val profiles: List<ProfileInfo> = emptyList(),
     @SerialName("bot_mode_protocol") val botModeProtocol: Boolean = false,
+)
+
+@Serializable
+data class ProfileCapability(
+    val name: String,
+    val enabled: Boolean = true,
+    val label: String = "",
+    val description: String = "",
+    @SerialName("tool_count") val toolCount: Int = 0,
+    val transport: String = "",
+)
+
+@Serializable
+data class ProfileModelPin(
+    val provider: String = "",
+    val default: String = "",
+)
+
+@Serializable
+data class ProfileDescription(
+    val name: String,
+    val description: String = "",
+    val soul: String = "",
+    val model: ProfileModelPin = ProfileModelPin(),
+    val skills: List<ProfileCapability> = emptyList(),
+    val toolsets: List<ProfileCapability> = emptyList(),
+    @SerialName("toolsets_pinned") val toolsetsPinned: Boolean = false,
+    @SerialName("mcp_servers") val mcpServers: List<ProfileCapability> = emptyList(),
+)
+
+@Serializable
+data class ProfileAsset(
+    val found: Boolean = false,
+    val data: String? = null,
+    val mime: String? = null,
+    val size: Int = 0,
+)
+
+@Serializable
+data class ProfileConfigureResult(
+    val ok: Boolean = false,
+    val applied: Map<String, JsonElement> = emptyMap(),
+)
+
+@Serializable
+data class ImageGenerationResult(
+    val available: Boolean = false,
+    val success: Boolean = false,
+    val image: String? = null,
+    @SerialName("image_data") val imageData: String? = null,
+    val error: String? = null,
+)
+
+@Serializable
+data class PetGalleryEntry(
+    val slug: String,
+    @SerialName("displayName") val displayName: String = slug,
+    val installed: Boolean = false,
+    val curated: Boolean = false,
+    val generated: Boolean = false,
+)
+
+@Serializable
+data class PetGallery(
+    val enabled: Boolean = false,
+    val active: String = "",
+    val pets: List<PetGalleryEntry> = emptyList(),
 )
 
 @Serializable

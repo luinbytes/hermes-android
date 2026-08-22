@@ -36,6 +36,19 @@ class BotProfilesProtocolTest {
     }
 
     @Test
+    fun `decodes complete profile editor contract`() {
+        val result = json.decodeFromString<ProfileDescription>(
+            checkNotNull(javaClass.getResource("/fixtures/profile-description-261a4ef.json")).readText(),
+        )
+
+        assertEquals("coder", result.name)
+        assertEquals("hermes-4", result.model.default)
+        assertFalse(result.skills.last().enabled)
+        assertEquals(4, result.toolsets.single().toolCount)
+        assertEquals("http", result.mcpServers.single().transport)
+    }
+
+    @Test
     fun `older profile responses keep safe Bot Mode defaults`() {
         val result = json.decodeFromString<ProfilesResponse>(
             """{"profiles":[{"name":"default","is_default":true}]}""",
@@ -47,5 +60,16 @@ class BotProfilesProtocolTest {
         assertNull(profile.canonicalSession)
         assertNull(profile.uiMeta)
         assertTrue(profile.uiMetaRevisions.isEmpty())
+    }
+
+    @Test
+    fun `pet gallery keeps installed and curated avatar sources`() {
+        val result = json.decodeFromString<PetGallery>(
+            """{"enabled":true,"active":"fox","pets":[{"slug":"fox","displayName":"Fox","installed":true,"curated":true}]}""",
+        )
+
+        assertTrue(result.enabled)
+        assertTrue(result.pets.single().installed)
+        assertEquals("Fox", result.pets.single().displayName)
     }
 }

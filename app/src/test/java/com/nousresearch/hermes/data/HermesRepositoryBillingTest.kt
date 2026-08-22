@@ -10,6 +10,7 @@ import com.nousresearch.hermes.domain.TimelineItem
 import com.nousresearch.hermes.protocol.GatewayConnectionState
 import com.nousresearch.hermes.protocol.GatewayEvent
 import com.nousresearch.hermes.protocol.HermesGatewayClient
+import com.nousresearch.hermes.protocol.HermesRpcException
 import com.nousresearch.hermes.protocol.StoredSession
 import com.nousresearch.hermes.platform.newCameraCaptureUri
 import java.io.File
@@ -51,6 +52,203 @@ import org.robolectric.annotation.Config
 @Config(sdk = [35])
 class HermesRepositoryBillingTest {
     private val json = Json { ignoreUnknownKeys = true; explicitNulls = false }
+
+    @Test
+    fun `quick agent creation uses current profile contract and opens its canonical chat`() = runBlocking {
+        MockWebServer().use { server ->
+            server.dispatcher = readyDashboardDispatcher(withProfiles = true)
+            server.start()
+            val context = RuntimeEnvironment.getApplication()
+            val backend = backend(server)
+            val registry = BackendRegistry(context, json)
+            val credentials = InMemoryCredentialStore()
+            val gateway = RecordingGateway(json)
+            registry.save(backend)
+            credentials.put(backend.id, SESSION_COOKIE)
+            val repository = repository(context, registry, credentials, BillingPendingChargeStore(context, json), gateway)
+            awaitReady(repository, backend.id)
+            gateway.enqueue("profiles.create", json.parseToJsonElement("""{"ok":true,"name":"helper"}"""))
+            gateway.enqueue("profiles.list", json.parseToJsonElement("""{"profiles":[{"name":"helper"}]}"""))
+            gateway.enqueue("session.list", json.parseToJsonElement("""{"sessions":[]}"""))
+            gateway.enqueue(
+                "session.create",
+                json.parseToJsonElement(
+                    """{"session_id":"live-helper","stored_session_id":"helper-chat","messages":[],"info":{"stored_session_id":"helper-chat"}}""",
+                ),
+            )
+            gateway.enqueue("model.options", json.parseToJsonElement("""{"providers":[]}"""))
+            gateway.enqueue("session.title", json.parseToJsonElement("""{"ok":true}"""))
+            gateway.enqueue("prompt.submit", json.parseToJsonElement("""{"status":"streaming"}"""))
+
+            assertTrue(
+                repository.createBotAgent(
+                    BotAgentDraft(name = "helper", description = "Plans releases", soul = "Be careful."),
+                ),
+            )
+
+            val create = gateway.requests.single { it.method == "profiles.create" }.params.toString()
+            assertTrue(create.contains("\"description\":\"Plans releases\""))
+            assertTrue(create.contains("\"mirror_credentials\":true"))
+            assertTrue(create.contains("\"share_auth\":true"))
+            assertEquals("helper", repository.state.value.activeStoredSession?.profile)
+            assertEquals("Bot Chat", repository.state.value.activeStoredSession?.title)
+        }
+    }
+
+    @Test
+    fun `quick agent creation retries only the canonical chat after a partial failure`() = runBlocking {
+        MockWebServer().use { server ->
+            server.dispatcher = readyDashboardDispatcher(withProfiles = true)
+            server.start()
+            val context = RuntimeEnvironment.getApplication()
+            val backend = backend(server)
+            val registry = BackendRegistry(context, json)
+            val credentials = InMemoryCredentialStore()
+            val gateway = RecordingGateway(json)
+            registry.save(backend)
+            credentials.put(backend.id, SESSION_COOKIE)
+            val repository = repository(context, registry, credentials, BillingPendingChargeStore(context, json), gateway)
+            awaitReady(repository, backend.id)
+            gateway.enqueue("profiles.create", json.parseToJsonElement("""{"ok":true,"name":"helper"}"""))
+            gateway.enqueue("profiles.list", json.parseToJsonElement("""{"profiles":[{"name":"helper"}]}"""))
+            gateway.enqueueFailure("session.list", IOException("temporary lookup failure"))
+
+            assertFalse(repository.createBotAgent(BotAgentDraft(name = "helper")))
+
+            gateway.enqueue("profiles.list", json.parseToJsonElement("""{"profiles":[{"name":"helper"}]}"""))
+            gateway.enqueue("session.list", json.parseToJsonElement("""{"sessions":[]}"""))
+            gateway.enqueue(
+                "session.create",
+                json.parseToJsonElement(
+                    """{"session_id":"live-helper","stored_session_id":"helper-chat","messages":[],"info":{"stored_session_id":"helper-chat"}}""",
+                ),
+            )
+            gateway.enqueue("model.options", json.parseToJsonElement("""{"providers":[]}"""))
+            gateway.enqueue("session.title", json.parseToJsonElement("""{"ok":true}"""))
+            gateway.enqueue("prompt.submit", json.parseToJsonElement("""{"status":"streaming"}"""))
+
+            assertTrue(repository.createBotAgent(BotAgentDraft(name = "helper")))
+            assertEquals(1, gateway.requests.count { it.method == "profiles.create" })
+        }
+    }
+
+    @Test
+    fun `agent creation targets an isolated backend without switching the active conversation`() = runBlocking {
+        MockWebServer().use { server ->
+            server.dispatcher = readyDashboardDispatcher()
+            server.start()
+            val context = RuntimeEnvironment.getApplication()
+            val current = backend(server)
+            val remote = current.copy(id = "remote-${BACKEND_IDS.incrementAndGet()}", label = "Remote")
+            val registry = BackendRegistry(context, json)
+            val credentials = InMemoryCredentialStore()
+            val gateway = RecordingGateway(json)
+            val scoped = RecordingGateway(json)
+            gateway.forkedGateway = scoped
+            registry.save(current)
+            registry.save(remote)
+            registry.select(current.id)
+            credentials.put(current.id, SESSION_COOKIE)
+            credentials.put(remote.id, SESSION_COOKIE)
+            val repository = repository(context, registry, credentials, BillingPendingChargeStore(context, json), gateway)
+            awaitReady(repository, current.id)
+            scoped.enqueue("profiles.create", json.parseToJsonElement("""{"ok":true,"name":"helper"}"""))
+            scoped.enqueue("session.list", json.parseToJsonElement("""{"sessions":[]}"""))
+            scoped.enqueue(
+                "session.create",
+                json.parseToJsonElement(
+                    """{"session_id":"remote-live","stored_session_id":"remote-chat","messages":[],"info":{"stored_session_id":"remote-chat"}}""",
+                ),
+            )
+            scoped.enqueueFailure("session.title", HermesRpcException("Method not found", -32601))
+            scoped.enqueue("prompt.submit", json.parseToJsonElement("""{"status":"streaming"}"""))
+
+            assertTrue(repository.createBotAgent(BotAgentDraft(name = "helper"), backendId = remote.id))
+
+            assertEquals(current.id, repository.state.value.backend?.id)
+            assertEquals(listOf(remote.id), scoped.connectedBackendIds)
+            assertTrue(scoped.requests.any { it.method == "profiles.create" })
+            assertTrue(scoped.requests.any { it.method == "prompt.submit" })
+            assertFalse(gateway.requests.any { it.method == "profiles.create" })
+        }
+    }
+
+    @Test
+    fun `agent editor capabilities and every shared avatar source use gateway contracts`() = runBlocking {
+        MockWebServer().use { server ->
+            server.dispatcher = readyDashboardDispatcher(withProfiles = true)
+            server.start()
+            val context = RuntimeEnvironment.getApplication()
+            val backend = backend(server)
+            val registry = BackendRegistry(context, json)
+            val credentials = InMemoryCredentialStore()
+            val gateway = RecordingGateway(json)
+            registry.save(backend)
+            credentials.put(backend.id, SESSION_COOKIE)
+            val repository = repository(context, registry, credentials, BillingPendingChargeStore(context, json), gateway)
+            awaitReady(repository, backend.id)
+            gateway.enqueue(
+                "profiles.describe",
+                checkNotNull(javaClass.getResource("/fixtures/profile-description-261a4ef.json"))
+                    .readText().let(json::parseToJsonElement),
+            )
+
+            assertEquals("hermes-4", repository.describeBotAgent("coder").model.default)
+
+            gateway.enqueue(
+                "profiles.configure",
+                json.parseToJsonElement(
+                    """{"ok":true,"applied":{"description":true,"soul":true,"model":true,"skills":true,"toolsets":true,"mcp_servers":true}}""",
+                ),
+            )
+            gateway.enqueue("profiles.list", json.parseToJsonElement("""{"profiles":[]}"""))
+            repository.configureBotAgent(
+                BotAgentDraft(
+                    name = "coder",
+                    description = "Builds apps",
+                    soul = "Be precise.",
+                    provider = "nous",
+                    model = "hermes-4",
+                    disabledSkills = setOf("legacy"),
+                    enabledToolsets = setOf("web"),
+                    enabledMcpServers = setOf("github"),
+                ),
+            )
+            val configure = gateway.requests.single { it.method == "profiles.configure" }.params.toString()
+            assertTrue(configure.contains("\"disabled_skills\":[\"legacy\"]"))
+            assertTrue(configure.contains("\"enabled_toolsets\":[\"web\"]"))
+            assertTrue(configure.contains("\"enabled_mcp_servers\":[\"github\"]"))
+
+            gateway.enqueue("profiles.get_asset", json.parseToJsonElement("""{"found":true,"data":"data:image/png;base64,AA==","mime":"image/png","size":1}"""))
+            assertTrue(repository.profileAvatar("coder").found)
+
+            gateway.enqueue("profiles.set_asset", json.parseToJsonElement("""{"ok":true,"size":1}"""))
+            gateway.enqueue("profiles.list", json.parseToJsonElement("""{"profiles":[]}"""))
+            repository.setProfileAvatar("coder", "data:image/png;base64,AA==")
+
+            gateway.enqueue(
+                "image.generate",
+                json.parseToJsonElement("""{"available":true,"success":true,"image_data":"data:image/png;base64,AA=="}"""),
+            )
+            gateway.enqueue("profiles.set_asset", json.parseToJsonElement("""{"ok":true,"size":1}"""))
+            gateway.enqueue("profiles.list", json.parseToJsonElement("""{"profiles":[]}"""))
+            assertEquals("data:image/png;base64,AA==", repository.generateProfileAvatar("coder", "friendly robot"))
+
+            gateway.enqueue(
+                "pet.gallery",
+                json.parseToJsonElement("""{"enabled":true,"pets":[{"slug":"fox","displayName":"Fox","installed":true}]}"""),
+            )
+            assertEquals("fox", repository.profilePetGallery("coder").pets.single().slug)
+            gateway.enqueue("pet.select", json.parseToJsonElement("""{"ok":true,"slug":"fox"}"""))
+            gateway.enqueue(
+                "pet.cells",
+                json.parseToJsonElement("""{"enabled":true,"frames":[[[[255,0,0,255,0,0,255,255]]]]}"""),
+            )
+            gateway.enqueue("profiles.set_asset", json.parseToJsonElement("""{"ok":true,"size":80}"""))
+            gateway.enqueue("profiles.list", json.parseToJsonElement("""{"profiles":[]}"""))
+            assertTrue(repository.adoptProfilePet("coder", "fox").startsWith("data:image/png;base64,"))
+        }
+    }
 
     @Test
     fun `canonical bot chat opens the exact compression tip without creating`() = runBlocking {
@@ -1879,6 +2077,9 @@ private class RecordingGateway(
     private var blockedReconnect: BlockedReconnect? = null
     val requests = mutableListOf<RecordedGatewayRequest>()
     val connectedBackendIds = mutableListOf<String>()
+    var forkedGateway: RecordingGateway? = null
+
+    override fun fork(): HermesGatewayClient = forkedGateway ?: this
 
     override val connectionState: StateFlow<GatewayConnectionState> = mutableConnectionState
     override val events: SharedFlow<GatewayEvent> = mutableEvents

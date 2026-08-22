@@ -37,6 +37,7 @@ import com.nousresearch.hermes.protocol.GatewayConnectionState
 import com.nousresearch.hermes.protocol.HermesGatewayClient
 import com.nousresearch.hermes.protocol.HermesRpcException
 import com.nousresearch.hermes.protocol.ImageAttachResult
+import com.nousresearch.hermes.protocol.ImageGenerationResult
 import com.nousresearch.hermes.protocol.ModelOptionsResult
 import com.nousresearch.hermes.protocol.OAuthProvider
 import com.nousresearch.hermes.protocol.McpCatalogEntry
@@ -46,7 +47,11 @@ import com.nousresearch.hermes.protocol.McpServerTestResponse
 import com.nousresearch.hermes.protocol.MessagingPlatformInfo
 import com.nousresearch.hermes.protocol.MessagingPlatformTestResponse
 import com.nousresearch.hermes.protocol.PdfAttachResult
+import com.nousresearch.hermes.protocol.PetGallery
 import com.nousresearch.hermes.protocol.ProfileCreatePayload
+import com.nousresearch.hermes.protocol.ProfileAsset
+import com.nousresearch.hermes.protocol.ProfileConfigureResult
+import com.nousresearch.hermes.protocol.ProfileDescription
 import com.nousresearch.hermes.protocol.ProfileInfo
 import com.nousresearch.hermes.protocol.ProfilesResponse
 import com.nousresearch.hermes.protocol.ProtocolMessage
@@ -112,10 +117,14 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.int
 import kotlinx.serialization.json.put
 
 internal fun botHiddenConfigureParams(profile: ProfileInfo, hidden: Boolean) = buildJsonObject {
@@ -292,6 +301,17 @@ data class ProfileIdentityDraft(
     val model: String,
 )
 
+data class BotAgentDraft(
+    val name: String,
+    val description: String = "",
+    val soul: String = "",
+    val provider: String = "",
+    val model: String = "",
+    val disabledSkills: Set<String> = emptySet(),
+    val enabledToolsets: Set<String> = emptySet(),
+    val enabledMcpServers: Set<String> = emptySet(),
+)
+
 data class EntryAuthoritySnapshot(
     val profileIds: Set<String>,
     val cronJobIds: Set<String>,
@@ -317,6 +337,8 @@ private data class ProviderRefreshSnapshot(
     val oauthProviders: List<OAuthProvider>,
     val providerAccountsSupported: Boolean,
 )
+
+private data class BotProfileKey(val backendId: String, val profile: String)
 
 enum class DiagnosticAction(val wireName: String) {
     DOCTOR("doctor"),
@@ -403,7 +425,8 @@ class HermesRepository @Inject constructor(
     private val sessionListRefreshPriorityMutex = Mutex()
     private val backendCredentialGeneration = AtomicLong()
     private val profileRefreshGeneration = AtomicLong()
-    private val canonicalChatMutexes = ConcurrentHashMap<String, Mutex>()
+    private val canonicalChatMutexes = ConcurrentHashMap<BotProfileKey, Mutex>()
+    private val pendingBotCreations = ConcurrentHashMap.newKeySet<BotProfileKey>()
     private val sessionListMutationMutex = Mutex()
     private var slashCompletionJob: Job? = null
     private var queueDrainJob: Job? = null
@@ -1158,7 +1181,7 @@ class HermesRepository @Inject constructor(
         require(profile.isNotEmpty()) { "Hermes profile is required" }
         val backendId = mutableState.value.backend?.id ?: return false
         val credentialGeneration = backendCredentialGeneration.get()
-        return canonicalChatMutexes.getOrPut("$backendId::${profile.normalizedProfile()}") { Mutex() }.withLock {
+        return canonicalChatMutexes.getOrPut(BotProfileKey(backendId, profile.normalizedProfile())) { Mutex() }.withLock {
             if (
                 mutableState.value.backend?.id != backendId ||
                 backendCredentialGeneration.get() != credentialGeneration
@@ -2282,6 +2305,228 @@ class HermesRepository @Inject constructor(
             ) { "Hermes did not save the Bot visibility change; refresh and try again" }
             refreshProfiles()
         }.onFailure(::fail)
+    }
+
+    suspend fun describeBotAgent(profileName: String): ProfileDescription {
+        val name = profileName.trim()
+        require(name.isNotEmpty()) { "Hermes profile is required" }
+        return gateway.request("profiles.describe", buildJsonObject { put("name", name) })
+            .let { json.decodeFromJsonElement(ProfileDescription.serializer(), it) }
+    }
+
+    suspend fun createBotAgent(
+        draft: BotAgentDraft,
+        backendId: String = mutableState.value.backend?.id.orEmpty(),
+        cloneFrom: String? = null,
+        cloneAll: Boolean = false,
+        noSkills: Boolean = false,
+        mirrorCredentials: Boolean = true,
+    ): Boolean {
+        val name = draft.name.trim()
+        require(name.isNotEmpty()) { "Agent name is required" }
+        val creationKey = BotProfileKey(backendId, name.normalizedProfile())
+        return try {
+            withBotGateway(backendId) { client, _ ->
+                if (creationKey !in pendingBotCreations) {
+                    client.request(
+                        "profiles.create",
+                        buildJsonObject {
+                            put("name", name)
+                            put("description", draft.description.trim())
+                            cloneFrom?.trim()?.takeIf(String::isNotEmpty)?.let { put("clone_from", it) }
+                            put("clone_all", cloneAll)
+                            put("no_skills", noSkills)
+                            put("soul", draft.soul)
+                            if (draft.provider.isNotBlank() && draft.model.isNotBlank()) {
+                                put("provider", draft.provider.trim())
+                                put("model", draft.model.trim())
+                            }
+                            put("mirror_credentials", mirrorCredentials)
+                            put("share_auth", mirrorCredentials)
+                        },
+                    )
+                    pendingBotCreations += creationKey
+                }
+                val opened = if (mutableState.value.backend?.id == backendId) {
+                    refreshProfiles()
+                    openCanonicalBotChat(name)
+                } else {
+                    createRemoteCanonicalBotChat(client, name)
+                }
+                if (opened) pendingBotCreations -= creationKey
+                opened
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Throwable) {
+            fail(error)
+            false
+        }
+    }
+
+    private suspend fun createRemoteCanonicalBotChat(client: HermesGatewayClient, profile: String): Boolean {
+        val existing = client.request(
+            "session.list",
+            buildJsonObject {
+                put("profile", profile)
+                put("title", BOT_CHAT_TITLE)
+                put("limit", 200)
+                put("include_hidden", true)
+            },
+        ).let { json.decodeFromJsonElement(BotSessionPage.serializer(), it) }
+            .sessions.firstOrNull(BotSessionSummary::isCanonicalBotChat)
+        if (existing != null) return true
+        val created = client.request(
+            "session.create",
+            buildJsonObject {
+                put("profile", profile)
+                put("title", BOT_CHAT_TITLE)
+                put("hidden", true)
+            },
+        ).let { json.decodeFromJsonElement(SessionCreateResult.serializer(), it) }
+        val runtimeId = created.runtimeSessionId.takeIf(String::isNotBlank)
+            ?: throw IllegalStateException("Hermes did not return the new Bot Chat")
+        try {
+            client.request(
+                "session.title",
+                buildJsonObject {
+                    put("session_id", runtimeId)
+                    put("title", BOT_CHAT_TITLE)
+                },
+            )
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: HermesRpcException) {
+            if (error.rpcCode != -32601) throw error
+            // The create call already persisted the title on current Hermes.
+        }
+        client.request(
+            "prompt.submit",
+            buildJsonObject {
+                put("session_id", runtimeId)
+                put("message", BOT_CHAT_INTRO)
+            },
+        )
+        return true
+    }
+
+    suspend fun configureBotAgent(draft: BotAgentDraft) {
+        val name = draft.name.trim()
+        require(name.isNotEmpty()) { "Agent name is required" }
+        val response = gateway.request(
+            "profiles.configure",
+            buildJsonObject {
+                put("name", name)
+                put("description", draft.description.trim())
+                put("soul", draft.soul)
+                if (draft.provider.isNotBlank() && draft.model.isNotBlank()) {
+                    put("provider", draft.provider.trim())
+                    put("model", draft.model.trim())
+                }
+                put("disabled_skills", JsonArray(draft.disabledSkills.sorted().map(::JsonPrimitive)))
+                put("enabled_toolsets", JsonArray(draft.enabledToolsets.sorted().map(::JsonPrimitive)))
+                put("enabled_mcp_servers", JsonArray(draft.enabledMcpServers.sorted().map(::JsonPrimitive)))
+            },
+        ).let { json.decodeFromJsonElement(ProfileConfigureResult.serializer(), it) }
+        require(response.ok) {
+            val failed = response.applied.filterValues { it.jsonPrimitive.booleanOrNull != true }.keys
+            "Hermes could not save ${failed.joinToString().ifBlank { "the agent configuration" }}"
+        }
+        refreshProfiles()
+    }
+
+    suspend fun profileAvatar(profileName: String): ProfileAsset = gateway.request(
+        "profiles.get_asset",
+        buildJsonObject {
+            put("name", profileName.trim())
+            put("asset", "avatar")
+        },
+    ).let { json.decodeFromJsonElement(ProfileAsset.serializer(), it) }
+
+    suspend fun setProfileAvatar(profileName: String, dataUrl: String?) {
+        val response = gateway.request(
+            "profiles.set_asset",
+            buildJsonObject {
+                put("name", profileName.trim())
+                put("asset", "avatar")
+                if (dataUrl == null) put("clear", true) else put("data", dataUrl)
+            },
+        )
+        require(response.jsonObject["ok"]?.jsonPrimitive?.booleanOrNull == true) { "Hermes did not save the avatar" }
+        refreshProfiles()
+    }
+
+    suspend fun generateProfileAvatar(profileName: String, prompt: String): String {
+        val cleanPrompt = prompt.trim()
+        require(cleanPrompt.isNotEmpty()) { "Describe the avatar you want" }
+        val result = gateway.request(
+            "image.generate",
+            buildJsonObject {
+                put("prompt", cleanPrompt)
+                put("aspect_ratio", "square")
+                put("max_bytes", 2_000_000)
+            },
+        ).let { json.decodeFromJsonElement(ImageGenerationResult.serializer(), it) }
+        require(result.available && result.success) { result.error ?: "Image generation is unavailable" }
+        val image = result.imageData
+            ?: result.image?.takeIf { it.startsWith("data:image/") }
+            ?: result.image?.let { restClient.publicImageDataUrl(it) }
+            ?: throw IllegalStateException("Hermes could not return this image to Android")
+        setProfileAvatar(profileName, image)
+        return image
+    }
+
+    suspend fun profilePetGallery(profileName: String): PetGallery = gateway.request(
+        "pet.gallery",
+        buildJsonObject {
+            put("profile", profileName.trim())
+            put("localOnly", false)
+        },
+    ).let { json.decodeFromJsonElement(PetGallery.serializer(), it) }
+
+    suspend fun adoptProfilePet(profileName: String, slug: String): String {
+        val profile = profileName.trim()
+        val pet = slug.trim()
+        require(profile.isNotEmpty() && pet.isNotEmpty()) { "Choose a pet" }
+        gateway.request(
+            "pet.select",
+            buildJsonObject {
+                put("profile", profile)
+                put("slug", pet)
+            },
+        )
+        val cells = gateway.request(
+            "pet.cells",
+            buildJsonObject {
+                put("profile", profile)
+                put("state", "idle")
+                put("cols", 24)
+            },
+        ).jsonObject
+        require(cells["enabled"]?.jsonPrimitive?.booleanOrNull == true) { "Hermes could not render that pet" }
+        val frame = cells["frames"]?.jsonArray?.firstOrNull()?.jsonArray
+            ?: throw IllegalStateException("Hermes returned no pet artwork")
+        val rows = frame.map { it.jsonArray }
+        val width = rows.firstOrNull()?.size ?: throw IllegalStateException("Hermes returned empty pet artwork")
+        require(width in 1..64 && rows.size in 1..64) { "Hermes returned oversized pet artwork" }
+        val bitmap = android.graphics.Bitmap.createBitmap(width, rows.size * 2, android.graphics.Bitmap.Config.ARGB_8888)
+        rows.forEachIndexed { y, row ->
+            require(row.size == width) { "Hermes returned malformed pet artwork" }
+            row.forEachIndexed { x, encoded ->
+                val rgba = encoded.jsonArray.map { it.jsonPrimitive.int }
+                require(rgba.size == 8 && rgba.all { it in 0..255 }) { "Hermes returned malformed pet colours" }
+                bitmap.setPixel(x, y * 2, android.graphics.Color.argb(rgba[3], rgba[0], rgba[1], rgba[2]))
+                bitmap.setPixel(x, y * 2 + 1, android.graphics.Color.argb(rgba[7], rgba[4], rgba[5], rgba[6]))
+            }
+        }
+        val bytes = java.io.ByteArrayOutputStream().use { output ->
+            check(bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, output))
+            output.toByteArray()
+        }
+        bitmap.recycle()
+        val data = "data:image/png;base64,${android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)}"
+        setProfileAvatar(profile, data)
+        return data
     }
 
     suspend fun entryAuthoritySnapshot(includeCronJobs: Boolean): EntryAuthoritySnapshot? = try {
@@ -5382,6 +5627,27 @@ class HermesRepository @Inject constructor(
             ),
             error = null,
         )
+    }
+
+    private suspend fun <T> withBotGateway(
+        backendId: String,
+        action: suspend (HermesGatewayClient, BackendConfig) -> T,
+    ): T {
+        val current = mutableState.value
+        val backend = current.savedBackends.firstOrNull { it.id == backendId }
+            ?: throw IllegalArgumentException("Unknown Hermes backend")
+        if (current.backend?.id == backendId) return action(gateway, backend)
+        require(backend.authMode == AuthMode.DASHBOARD_SESSION) { "Reconnect this backend before managing its agents" }
+        val credential = tokenStore.get(backend.id)
+            ?: throw ReconnectRequiredException("Dashboard session is unavailable for ${backend.label}; reconnect is required.")
+        val scoped = gateway.fork()
+        require(scoped !== gateway) { "This Hermes transport cannot isolate a second backend" }
+        scoped.connect(backend, credential)
+        return try {
+            action(scoped, backend)
+        } finally {
+            scoped.disconnect()
+        }
     }
 
     private suspend fun activeCredentials(
