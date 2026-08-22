@@ -18,6 +18,7 @@ import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import com.nousresearch.hermes.protocol.StoredSession
@@ -32,6 +33,8 @@ import com.nousresearch.hermes.protocol.BotGroupQuestion
 import com.nousresearch.hermes.data.BackendConfig
 import com.nousresearch.hermes.data.AuthMode
 import com.nousresearch.hermes.data.HermesState
+import com.nousresearch.hermes.data.BotDirectChat
+import com.nousresearch.hermes.data.BotDirectMessage
 import com.nousresearch.hermes.protocol.CronJob
 import com.nousresearch.hermes.protocol.CronJobSchedule
 import com.nousresearch.hermes.platform.createHermesNotificationChannels
@@ -104,6 +107,7 @@ class SessionInboxLayoutTest {
                             latestSession = StoredSession(sessionId = "chat", profile = "coder", title = "Fix the release", lastActive = 10.0),
                             selected = true,
                             sourceLabel = "Mac mini",
+                            offline = true,
                             unread = true,
                         ),
                         nowMillis = 20_000L,
@@ -120,10 +124,45 @@ class SessionInboxLayoutTest {
                 hasContentDescription("Mac mini", substring = true) and
                 hasContentDescription("Builds Android apps", substring = true) and
                 hasContentDescription("Selected", substring = true) and
-                hasContentDescription("Active", substring = true) and
                 hasContentDescription("Unread", substring = true) and
-                hasContentDescription("Hidden", substring = true),
+                hasContentDescription("Hidden", substring = true) and
+                hasContentDescription("Offline", substring = true),
         ).assertExists()
+        compose.onNodeWithText("OFFLINE · LAST KNOWN", useUnmergedTree = true).assertExists()
+    }
+
+    @Test
+    fun remoteBotDialogLoadsAndSendsOnItsScopedCallbacks() {
+        var sent = ""
+        compose.setContent {
+            HermesTheme {
+                BotDirectChatDialog(
+                    bot = BotConversation(
+                        profile = ProfileInfo(name = "reviewer", displayName = "Reviewer"),
+                        backendId = "cloud",
+                        sourceLabel = "Cloud",
+                    ),
+                    onLoad = { BotDirectChat(listOf(BotDirectMessage("one", "assistant", "Earlier"))) },
+                    onSend = { message ->
+                        sent = message
+                        BotDirectChat(
+                            listOf(
+                                BotDirectMessage("one", "assistant", "Earlier"),
+                                BotDirectMessage("two", "user", message),
+                                BotDirectMessage("three", "assistant", "Green."),
+                            ),
+                        )
+                    },
+                    onDismiss = {},
+                )
+            }
+        }
+
+        compose.waitUntil(5_000) { compose.onAllNodesWithText("Earlier").fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithText("Message Reviewer").performTextInput("Status?")
+        compose.onNodeWithText("Send").performClick()
+        compose.waitUntil(5_000) { compose.onAllNodesWithText("Green.").fetchSemanticsNodes().isNotEmpty() }
+        assertEquals("Status?", sent)
     }
 
     @Test
@@ -296,6 +335,33 @@ class SessionInboxLayoutTest {
                 hasContentDescription("Active", substring = true),
         ).performClick()
         assertEquals(1, clicks)
+    }
+
+    @Test
+    fun groupEditorDoesNotAddAnOfflineSource() {
+        compose.setContent {
+            HermesTheme {
+                BotGroupEditorDialog(
+                    room = null,
+                    candidates = listOf(
+                        com.nousresearch.hermes.protocol.BotGroupCandidate(
+                            ProfileInfo(name = "reviewer"),
+                            "cloud",
+                            "Cloud",
+                            "reviewer-cloud",
+                            offline = true,
+                        ),
+                    ),
+                    candidatesLoading = false,
+                    unavailableSources = listOf("Cloud"),
+                    onDismiss = {},
+                    onSave = { _, _, _ -> error("Offline member must not be saved") },
+                )
+            }
+        }
+
+        compose.onNodeWithContentDescription("Select @reviewer-cloud from Cloud").assertIsNotEnabled()
+        compose.onNodeWithText("@reviewer-cloud · Cloud · offline").assertExists()
     }
 
     @Test

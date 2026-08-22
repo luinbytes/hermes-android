@@ -24,6 +24,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Button
 import androidx.compose.material3.OutlinedButton
@@ -59,6 +60,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.customActions
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.material.icons.Icons
@@ -78,6 +80,7 @@ import com.nousresearch.hermes.protocol.BotGroupCandidate
 import com.nousresearch.hermes.protocol.BotGroupMember
 import com.nousresearch.hermes.protocol.BotGroupRoom
 import com.nousresearch.hermes.data.HermesState
+import com.nousresearch.hermes.data.BotDirectChat
 import com.nousresearch.hermes.data.botRoutineOwner
 import com.nousresearch.hermes.data.shouldNotifyBotEvent
 import com.nousresearch.hermes.platform.HermesNotificationKind
@@ -93,7 +96,10 @@ import kotlinx.serialization.json.jsonPrimitive
 internal data class BotConversation(
     val profile: ProfileInfo,
     val latestSession: StoredSession? = null,
+    val backendId: String = "",
     val sourceLabel: String = "",
+    val handle: String = profile.name,
+    val offline: Boolean = false,
     val selected: Boolean = false,
     val unread: Boolean = false,
 ) {
@@ -110,6 +116,9 @@ internal data class BotConversation(
 
     val identity: String
         get() = listOf(name, sourceLabel.takeIf(String::isNotBlank)).joinToString(" · ")
+
+    val sourceKey: String
+        get() = "$backendId:${profile.name}"
 
     val preview: String
         get() = (profile.canonicalSession ?: profile.preferredSession ?: profile.lastSession)?.let { summary ->
@@ -130,6 +139,7 @@ internal data class BotConversation(
     }
 
     fun isActive(nowMillis: Long, busyProfile: String?): Boolean {
+        if (offline) return false
         val nowSeconds = nowMillis / 1000.0
         val activity = activityTimestamp
         val workerActive = profile.workerSession?.lastActive?.let { it > 0 && nowSeconds - it < 150 } == true
@@ -284,6 +294,36 @@ internal fun botConversations(
     )
 }
 
+internal fun botConversations(
+    candidates: List<BotGroupCandidate>,
+    activeBackendId: String,
+    sessions: List<StoredSession>,
+    selectedSession: StoredSession?,
+    unreadProfiles: Set<String> = emptySet(),
+): List<BotConversation> = candidates.map { candidate ->
+    val local = candidate.backendId == activeBackendId
+    val latest = (candidate.profile.canonicalSession ?: candidate.profile.preferredSession ?: candidate.profile.lastSession)
+        ?.toStoredSession(candidate.profile.name)
+        ?: sessions.takeIf { local }?.filter {
+            it.profile.normalizedProfile() == candidate.profile.name.normalizedProfile()
+        }?.maxByOrNull(StoredSession::lastActive)
+    BotConversation(
+        profile = candidate.profile,
+        latestSession = latest,
+        backendId = candidate.backendId,
+        sourceLabel = candidate.backendLabel,
+        handle = candidate.handle,
+        offline = candidate.offline,
+        selected = local && selectedSession?.profile.normalizedProfile() == candidate.profile.name.normalizedProfile(),
+        unread = "${candidate.backendId}:${candidate.profile.name}" in unreadProfiles,
+    )
+}.sortedWith(
+    compareByDescending<BotConversation> { it.profile.isDefault }
+        .thenByDescending(BotConversation::activityTimestamp)
+        .thenBy { it.name.lowercase() }
+        .thenBy { it.sourceLabel.lowercase() },
+)
+
 private fun BotSessionSummary.toStoredSession(profile: String): StoredSession = StoredSession(
     sessionId = resolvedId ?: id,
     id = id,
@@ -317,6 +357,7 @@ internal fun BotRow(
         "Active".takeIf { active },
         "Unread".takeIf { bot.unread },
         "Hidden".takeIf { bot.hidden },
+        "Offline".takeIf { bot.offline },
     ).joinToString(", ")
     Column(Modifier.fillMaxWidth()) {
         Row(
@@ -362,6 +403,13 @@ internal fun BotRow(
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                 Text(bot.identity, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (bot.offline) {
+                    Text(
+                        "OFFLINE · LAST KNOWN",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
                 if (bot.role.isNotBlank()) {
                     Text(
                         bot.role,
@@ -415,6 +463,110 @@ internal fun BotRow(
         }
         HorizontalDivider(Modifier.padding(start = 76.dp))
     }
+}
+
+@Composable
+internal fun BotDirectChatDialog(
+    bot: BotConversation,
+    onLoad: suspend () -> BotDirectChat,
+    onSend: suspend (String) -> BotDirectChat,
+    onDismiss: () -> Unit,
+) {
+    val scope = rememberCoroutineScope()
+    var chat by remember(bot.backendId, bot.profile.name) { mutableStateOf<BotDirectChat?>(null) }
+    var draft by remember(bot.backendId, bot.profile.name) { mutableStateOf("") }
+    var loading by remember(bot.backendId, bot.profile.name) { mutableStateOf(true) }
+    var error by remember(bot.backendId, bot.profile.name) { mutableStateOf<String?>(null) }
+    LaunchedEffect(bot.backendId, bot.profile.name) {
+        try {
+            chat = onLoad()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (cause: Throwable) {
+            error = cause.message ?: "Hermes could not open this Bot Chat"
+        } finally {
+            loading = false
+        }
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("${bot.name} · ${bot.sourceLabel}", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                if (bot.offline) {
+                    Text("Last seen offline. Hermes will retry this source now.", color = MaterialTheme.colorScheme.error)
+                }
+                if (loading && chat == null) {
+                    Box(Modifier.fillMaxWidth().height(220.dp), contentAlignment = Alignment.Center) {
+                        CircularProgressIndicator()
+                    }
+                } else {
+                    LazyColumn(
+                        Modifier.fillMaxWidth().height(320.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        val messages = chat?.messages.orEmpty()
+                        if (messages.isEmpty()) {
+                            item("empty") { Text("No messages yet. Say hi.", style = MaterialTheme.typography.bodySmall) }
+                        }
+                        items(messages, key = { it.id }) { message ->
+                            Surface(
+                                color = if (message.role == "user") {
+                                    MaterialTheme.colorScheme.primaryContainer
+                                } else {
+                                    MaterialTheme.colorScheme.surfaceVariant
+                                },
+                                shape = RoundedCornerShape(12.dp),
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                Column(Modifier.padding(10.dp)) {
+                                    Text(
+                                        if (message.role == "user") "YOU" else bot.name.uppercase(),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.primary,
+                                    )
+                                    Text(message.text, style = MaterialTheme.typography.bodyMedium)
+                                }
+                            }
+                        }
+                    }
+                    OutlinedTextField(
+                        value = draft,
+                        onValueChange = { draft = it.take(32_000) },
+                        label = { Text("Message ${bot.name}") },
+                        enabled = !loading,
+                        minLines = 2,
+                        maxLines = 5,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+                error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = draft.isNotBlank() && !loading,
+                onClick = {
+                    val message = draft.trim()
+                    loading = true
+                    error = null
+                    scope.launch {
+                        try {
+                            chat = onSend(message)
+                            draft = ""
+                        } catch (cancelled: CancellationException) {
+                            throw cancelled
+                        } catch (cause: Throwable) {
+                            error = cause.message ?: "Hermes could not send this message"
+                        } finally {
+                            loading = false
+                        }
+                    }
+                },
+            ) { Text(if (loading && chat != null) "Sending…" else "Send") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Close") } },
+    )
 }
 
 private fun String.decodeAvatar() = runCatching {
@@ -561,16 +713,27 @@ internal fun BotGroupEditorDialog(
                 allCandidates.forEach { candidate ->
                     val profile = candidate.profile
                     val key = "${candidate.backendId}::${profile.name}"
+                    val canToggle = !candidate.offline || key in selected
                     Row(
-                        Modifier.fillMaxWidth().clickable {
+                        Modifier.fillMaxWidth().clickable(enabled = canToggle) {
                             selected = if (key in selected) selected - key else if (selected.size < 6) selected + key else selected
                         },
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Checkbox(key in selected, onCheckedChange = null)
+                        Checkbox(
+                            key in selected,
+                            onCheckedChange = null,
+                            enabled = canToggle,
+                            modifier = Modifier.semantics {
+                                contentDescription = "Select @${candidate.handle} from ${candidate.backendLabel}"
+                            },
+                        )
                         Column {
                             Text(profile.displayName.ifBlank { profile.name })
-                            Text("@${candidate.handle} · ${candidate.backendLabel}", style = MaterialTheme.typography.bodySmall)
+                            Text(
+                                "@${candidate.handle} · ${candidate.backendLabel}" + if (candidate.offline) " · offline" else "",
+                                style = MaterialTheme.typography.bodySmall,
+                            )
                         }
                     }
                 }

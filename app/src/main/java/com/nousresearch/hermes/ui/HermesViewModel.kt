@@ -325,6 +325,8 @@ class HermesViewModel @Inject constructor(
         val opened = repository.openCanonicalBotChat(profile)
         onOpened(repository.state.value.activeStoredSession.takeIf { opened })
     }
+    suspend fun botDirectChat(backendId: String, profile: String, prompt: String?) =
+        repository.botDirectChat(backendId, profile, prompt)
     fun newSession(profile: String? = null) = viewModelScope.launch { repository.newSession(profile) }
     suspend fun newSessionFromEntry(profile: String? = null): Boolean = repository.newSession(profile)
     fun send(text: String) = viewModelScope.launch { repository.send(text) }
@@ -394,8 +396,8 @@ class HermesViewModel @Inject constructor(
     fun deleteCron(jobId: String) = viewModelScope.launch { repository.deleteCron(jobId) }
     fun refreshProfiles() = viewModelScope.launch { repository.refreshProfiles() }
     fun refreshBotRoster() = viewModelScope.launch { repository.refreshProfiles(showLoading = false) }
-    fun setBotHidden(profile: String, hidden: Boolean) = viewModelScope.launch {
-        repository.setBotHidden(profile, hidden)
+    fun setBotHidden(backendId: String, profile: String, hidden: Boolean) = viewModelScope.launch {
+        repository.setBotHidden(profile, hidden, backendId)
     }
     suspend fun createBotGroup(name: String, members: List<com.nousresearch.hermes.protocol.BotGroupMember>) =
         repository.createBotGroup(name, members)
@@ -422,6 +424,7 @@ class HermesViewModel @Inject constructor(
     ) = repository.createBotAgent(draft, backendId, cloneFrom, cloneAll, noSkills, mirrorCredentials)
     suspend fun configureBotAgent(draft: com.nousresearch.hermes.data.BotAgentDraft) = repository.configureBotAgent(draft)
     suspend fun profileAvatar(profile: String) = repository.profileAvatar(profile)
+    suspend fun botProfileAvatar(backendId: String, profile: String) = repository.botProfileAvatar(backendId, profile)
     suspend fun setProfileAvatar(profile: String, dataUrl: String?) = repository.setProfileAvatar(profile, dataUrl)
     suspend fun generateProfileAvatar(profile: String, prompt: String) = repository.generateProfileAvatar(profile, prompt)
     suspend fun profilePetGallery(profile: String) = repository.profilePetGallery(profile)

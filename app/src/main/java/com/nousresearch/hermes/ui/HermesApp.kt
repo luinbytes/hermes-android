@@ -338,7 +338,8 @@ private data class ManagementActions(
     val deleteCron: (String) -> Unit,
     val refreshProfiles: () -> Unit,
     val refreshBotRoster: () -> Unit,
-    val setBotHidden: (String, Boolean) -> Unit,
+    val botDirectChat: suspend (String, String, String?) -> com.nousresearch.hermes.data.BotDirectChat,
+    val setBotHidden: (String, String, Boolean) -> Unit,
     val createBotGroup: suspend (String, List<com.nousresearch.hermes.protocol.BotGroupMember>) -> com.nousresearch.hermes.protocol.BotGroupRoom,
     val botGroupCandidates: suspend () -> com.nousresearch.hermes.protocol.BotGroupCandidateResult,
     val updateBotGroup: suspend (com.nousresearch.hermes.protocol.BotGroupRoom) -> com.nousresearch.hermes.protocol.BotGroupRoom,
@@ -350,6 +351,7 @@ private data class ManagementActions(
     val createBotAgent: suspend (BotAgentDraft, String, String?, Boolean, Boolean, Boolean) -> Boolean,
     val configureBotAgent: suspend (BotAgentDraft) -> Unit,
     val profileAvatar: suspend (String) -> ProfileAsset,
+    val botProfileAvatar: suspend (String, String) -> ProfileAsset,
     val setProfileAvatar: suspend (String, String?) -> Unit,
     val generateProfileAvatar: suspend (String, String) -> String,
     val profilePetGallery: suspend (String) -> PetGallery,
@@ -497,6 +499,7 @@ fun HermesApp(
             deleteCron = viewModel::deleteCron,
             refreshProfiles = viewModel::refreshProfiles,
             refreshBotRoster = viewModel::refreshBotRoster,
+            botDirectChat = viewModel::botDirectChat,
             setBotHidden = viewModel::setBotHidden,
             createBotGroup = viewModel::createBotGroup,
             botGroupCandidates = viewModel::botGroupCandidates,
@@ -509,6 +512,7 @@ fun HermesApp(
             createBotAgent = viewModel::createBotAgent,
             configureBotAgent = viewModel::configureBotAgent,
             profileAvatar = viewModel::profileAvatar,
+            botProfileAvatar = viewModel::botProfileAvatar,
             setProfileAvatar = viewModel::setProfileAvatar,
             generateProfileAvatar = viewModel::generateProfileAvatar,
             profilePetGallery = viewModel::profilePetGallery,
@@ -1228,6 +1232,7 @@ private fun HermesWorkspace(
         var selectedBotGroupId by rememberSaveable(backendId) { mutableStateOf<String?>(null) }
         var editingBotGroupId by rememberSaveable(backendId) { mutableStateOf<String?>(null) }
         var routineBotProfile by rememberSaveable(backendId) { mutableStateOf<String?>(null) }
+        var remoteBot by remember(backendId) { mutableStateOf<BotConversation?>(null) }
         if (botModeEnabled) BotActivityNotifications(state)
         var botGroupCandidates by remember(backendId) {
             mutableStateOf<List<com.nousresearch.hermes.protocol.BotGroupCandidate>>(emptyList())
@@ -1291,16 +1296,23 @@ private fun HermesWorkspace(
         }
         val openBotChat: (BotConversation) -> Unit = { bot ->
             selectedBotGroupId = null
-            sessionActions.openBotChat(bot.profile.name) { session ->
-                session?.let(openStoredSession)
+            if (bot.backendId.isBlank() || bot.backendId == backendId) {
+                sessionActions.openBotChat(bot.profile.name) { session ->
+                    session?.let(openStoredSession)
+                }
+            } else {
+                remoteBot = bot
             }
         }
         val openProfiles = {
             navigator.openManage(backendId, profileId, ManageSection.PROFILES_AND_MODELS, ManageDestination.PROFILES)
         }
-        val editBot: (String) -> Unit = { name ->
-            requestedProfileEditor = name
+        val editBot: (BotConversation) -> Unit = { bot ->
+            requestedProfileEditor = bot.profile.name
             openProfiles()
+        }
+        val openBotRoutines: (BotConversation) -> Unit = { bot ->
+            routineBotProfile = bot.profile.name
         }
         val openBotGroup: (com.nousresearch.hermes.protocol.BotGroupRoom) -> Unit = { room ->
             selectedBotGroupId = room.roomId
@@ -1694,7 +1706,7 @@ private fun HermesWorkspace(
                             onBot = openBotChat,
                             onGroup = openBotGroup,
                             onSetBotHidden = managementActions.setBotHidden,
-                            onLoadBotAvatar = managementActions.profileAvatar,
+                            onLoadBotAvatar = managementActions.botProfileAvatar,
                             onDeleteSession = onDeleteSession,
                             onArchiveSession = onArchiveSession,
                             onPinSession = onPinSession,
@@ -1706,7 +1718,7 @@ private fun HermesWorkspace(
                             onCreateGroup = { editingBotGroupId = "" },
                             selectedBotGroupId = selectedBotGroupId,
                             onEditBot = editBot,
-                            onBotRoutines = { routineBotProfile = it },
+                            onBotRoutines = openBotRoutines,
                             onAppSettings = { navigator.openAppSettings() },
                             onBackends = { navigate(WorkspaceContent.BACKENDS) },
                             botModeEnabled = botModeEnabled,
@@ -1746,7 +1758,7 @@ private fun HermesWorkspace(
                         onBot = openBotChat,
                         onGroup = openBotGroup,
                         onSetBotHidden = managementActions.setBotHidden,
-                        onLoadBotAvatar = managementActions.profileAvatar,
+                        onLoadBotAvatar = managementActions.botProfileAvatar,
                         onDeleteSession = onDeleteSession,
                         onArchiveSession = onArchiveSession,
                         onPinSession = onPinSession,
@@ -1758,7 +1770,7 @@ private fun HermesWorkspace(
                         onCreateGroup = { editingBotGroupId = "" },
                         selectedBotGroupId = selectedBotGroupId,
                         onEditBot = editBot,
-                        onBotRoutines = { routineBotProfile = it },
+                        onBotRoutines = openBotRoutines,
                         onAppSettings = { navigator.openAppSettings() },
                         onBackends = { navigate(WorkspaceContent.BACKENDS) },
                         botModeEnabled = botModeEnabled,
@@ -1840,6 +1852,14 @@ private fun HermesWorkspace(
                 onUpdate = managementActions.updateCron,
                 onDelete = managementActions.deleteCron,
                 onDismiss = { routineBotProfile = null },
+            )
+        }
+        remoteBot?.let { bot ->
+            BotDirectChatDialog(
+                bot = bot,
+                onLoad = { managementActions.botDirectChat(bot.backendId, bot.profile.name, null) },
+                onSend = { text -> managementActions.botDirectChat(bot.backendId, bot.profile.name, text) },
+                onDismiss = { remoteBot = null },
             )
         }
 
@@ -2073,8 +2093,8 @@ private fun SessionRail(
     onSession: (StoredSession) -> Unit,
     onBot: (BotConversation) -> Unit,
     onGroup: (com.nousresearch.hermes.protocol.BotGroupRoom) -> Unit,
-    onSetBotHidden: (String, Boolean) -> Unit,
-    onLoadBotAvatar: suspend (String) -> ProfileAsset,
+    onSetBotHidden: (String, String, Boolean) -> Unit,
+    onLoadBotAvatar: suspend (String, String) -> ProfileAsset,
     onDeleteSession: (StoredSession) -> Unit,
     onArchiveSession: (String, StoredSession) -> Unit,
     onPinSession: (String, StoredSession) -> Unit,
@@ -2085,8 +2105,8 @@ private fun SessionRail(
     onProfiles: () -> Unit,
     onCreateGroup: () -> Unit,
     selectedBotGroupId: String?,
-    onEditBot: (String) -> Unit,
-    onBotRoutines: (String) -> Unit,
+    onEditBot: (BotConversation) -> Unit,
+    onBotRoutines: (BotConversation) -> Unit,
     onAppSettings: () -> Unit,
     onBackends: () -> Unit,
     botModeEnabled: Boolean,
@@ -2123,13 +2143,23 @@ private fun SessionRail(
     } else {
         listOf("" to visibleSessions)
     }
-    val allBots = botConversations(
-        state.profiles,
-        state.sessions,
-        state.activeStoredSession,
-        sourceLabel = state.backend?.label.orEmpty(),
-        unreadProfiles = unreadProfiles,
-    )
+    val allBots = if (state.botCandidates.isEmpty()) {
+        botConversations(
+            state.profiles,
+            state.sessions,
+            state.activeStoredSession,
+            sourceLabel = state.backend?.label.orEmpty(),
+            unreadProfiles = unreadProfiles,
+        ).map { it.copy(backendId = state.backend?.id.orEmpty()) }
+    } else {
+        botConversations(
+            state.botCandidates,
+            state.backend?.id.orEmpty(),
+            state.sessions,
+            state.activeStoredSession,
+            unreadProfiles,
+        )
+    }
     val hiddenBots = allBots.filter(BotConversation::hidden)
     val visibleBots = allBots.filter { (showHiddenBots || !it.hidden) && it.matches(query) }
     val drawerState = rememberDrawerState(DrawerValue.Closed)
@@ -2152,29 +2182,38 @@ private fun SessionRail(
         if (state.runtimeSessionId == null) onNewSession() else confirmNewSession = true
     }
     val openBot: (BotConversation) -> Unit = { bot ->
-        unreadProfiles = unreadProfiles - bot.profile.name
+        unreadProfiles = unreadProfiles - bot.sourceKey
         onBot(bot)
     }
-    LaunchedEffect(allBots.map { it.profile.name to it.activityTimestamp }) {
+    LaunchedEffect(allBots.map { it.sourceKey to it.activityTimestamp }) {
         if (activityWatermarks.isEmpty()) {
-            activityWatermarks = allBots.associate { it.profile.name to it.activityTimestamp }
+            activityWatermarks = allBots.associate { it.sourceKey to it.activityTimestamp }
         } else {
             val selectedProfile = state.activeStoredSession?.profile.normalizedProfile()
             val advanced = allBots.filter { bot ->
-                val previous = activityWatermarks[bot.profile.name] ?: bot.activityTimestamp
-                bot.activityTimestamp > previous && bot.profile.name.normalizedProfile() != selectedProfile
+                val previous = activityWatermarks[bot.sourceKey] ?: bot.activityTimestamp
+                bot.activityTimestamp > previous &&
+                    (bot.backendId != state.backend?.id || bot.profile.name.normalizedProfile() != selectedProfile)
             }
-            unreadProfiles = unreadProfiles + advanced.map { it.profile.name }
-            activityWatermarks = allBots.associate { it.profile.name to maxOf(activityWatermarks[it.profile.name] ?: 0.0, it.activityTimestamp) }
+            unreadProfiles = unreadProfiles + advanced.map(BotConversation::sourceKey)
+            activityWatermarks = allBots.associate {
+                val key = it.sourceKey
+                key to maxOf(activityWatermarks[key] ?: 0.0, it.activityTimestamp)
+            }
         }
     }
-    LaunchedEffect(allBots.map { it.profile.name to it.profile.hasAvatar }) {
-        allBots.filter { it.profile.hasAvatar && it.profile.name !in botAvatars }.forEach { bot ->
-            runCatching { onLoadBotAvatar(bot.profile.name) }.getOrNull()?.data?.let { data ->
-                botAvatars = botAvatars + (bot.profile.name to data)
+    LaunchedEffect(allBots.map { Triple(it.backendId, it.profile.name, it.profile.hasAvatar && !it.offline) }) {
+        allBots.filter {
+            it.profile.hasAvatar && it.sourceKey !in botAvatars && !it.offline
+        }.forEach { bot ->
+            val key = bot.sourceKey
+            runCatching { onLoadBotAvatar(bot.backendId, bot.profile.name) }.getOrNull()?.data?.let { data ->
+                botAvatars = botAvatars + (key to data)
             }
         }
-        botAvatars = botAvatars.filterKeys { name -> allBots.any { it.profile.name == name && it.profile.hasAvatar } }
+        botAvatars = botAvatars.filterKeys { key ->
+            allBots.any { it.sourceKey == key && it.profile.hasAvatar }
+        }
     }
     LaunchedEffect(query, inboxMode) {
         onSearchSessions(if (inboxMode == ChatInboxMode.SESSIONS) query else "")
@@ -2314,18 +2353,20 @@ private fun SessionRail(
                                 onClick = { onGroup(room) },
                             )
                         }
-                        items(visibleBots, key = { "bot:${it.profile.name}" }) { bot ->
+                        items(visibleBots, key = { "bot:${it.backendId}:${it.profile.name}" }) { bot ->
                             BotRow(
                                 bot = bot,
                                 nowMillis = timestampNowMillis,
-                                busyProfile = state.activeProfile.takeIf { state.runtimeInfo.running },
+                                busyProfile = state.activeProfile.takeIf {
+                                    state.runtimeInfo.running && bot.backendId == state.backend?.id
+                                },
                                 onClick = { openBot(bot) },
                                 onToggleHidden = {
-                                    onSetBotHidden(bot.profile.name, !bot.hidden)
+                                    onSetBotHidden(bot.backendId, bot.profile.name, !bot.hidden)
                                 },
-                                onEdit = { onEditBot(bot.profile.name) },
-                                onRoutines = { onBotRoutines(bot.profile.name) },
-                                avatarData = botAvatars[bot.profile.name],
+                                onEdit = if (bot.backendId == state.backend?.id) ({ onEditBot(bot) }) else null,
+                                onRoutines = if (bot.backendId == state.backend?.id) ({ onBotRoutines(bot) }) else null,
+                                avatarData = botAvatars[bot.sourceKey],
                             )
                         }
                         if (visibleBots.isEmpty() && !state.managementLoading) {

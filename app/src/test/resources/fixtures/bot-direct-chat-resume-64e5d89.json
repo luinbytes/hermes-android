@@ -1,0 +1,11 @@
+{
+  "session_id": "remote-live",
+  "session_key": "remote-bot",
+  "status": "idle",
+  "running": false,
+  "messages": [
+    {"id": "assistant-earlier", "role": "assistant", "content": "Earlier"},
+    {"id": "user-status", "role": "user", "content": "Status?"},
+    {"id": "assistant-green", "role": "assistant", "content": "Green."}
+  ]
+}
