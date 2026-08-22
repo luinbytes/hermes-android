@@ -78,6 +78,7 @@ class MainActivity : ComponentActivity() {
             }
             val biometricReentry by biometricReentryFlow.collectAsStateWithLifecycle(initialValue = null)
             val skin by privacyPreferences.skin.collectAsStateWithLifecycle(initialValue = HermesSkin.NOUS)
+            val botModeEnabled by privacyPreferences.botModeEnabled.collectAsStateWithLifecycle(initialValue = false)
             val entryRequests by entryRequestStore.deliveries.collectAsStateWithLifecycle()
             val biometricAvailable = authenticationAvailable()
             val locked = biometricReentry == true && privacyGate.isLocked(enabled = true)
@@ -108,6 +109,10 @@ class MainActivity : ComponentActivity() {
                     skin = skin,
                     onSkinChange = { selected ->
                         lifecycleScope.launch { privacyPreferences.setSkin(selected) }
+                    },
+                    botModeEnabled = botModeEnabled,
+                    onBotModeEnabledChange = { enabled ->
+                        lifecycleScope.launch { privacyPreferences.setBotModeEnabled(enabled) }
                     },
                     entryDelivery = entryRequests.firstOrNull(),
                     onWorkspaceReady = { workspaceReady = true },

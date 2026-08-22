@@ -385,6 +385,10 @@ class HermesViewModel @Inject constructor(
     }
     fun deleteCron(jobId: String) = viewModelScope.launch { repository.deleteCron(jobId) }
     fun refreshProfiles() = viewModelScope.launch { repository.refreshProfiles() }
+    fun refreshBotRoster() = viewModelScope.launch { repository.refreshProfiles(showLoading = false) }
+    fun setBotHidden(profile: String, hidden: Boolean) = viewModelScope.launch {
+        repository.setBotHidden(profile, hidden)
+    }
     suspend fun entryAuthoritySnapshot(includeCronJobs: Boolean) =
         repository.entryAuthoritySnapshot(includeCronJobs)
     fun createProfile(name: String, cloneFrom: String, cloneAll: Boolean, noSkills: Boolean) = viewModelScope.launch {

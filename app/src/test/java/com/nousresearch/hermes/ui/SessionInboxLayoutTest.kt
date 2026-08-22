@@ -9,10 +9,12 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import com.nousresearch.hermes.protocol.StoredSession
+import com.nousresearch.hermes.protocol.ProfileInfo
 import com.nousresearch.hermes.ui.theme.HermesTheme
 import java.time.Instant
 import java.time.ZoneId
@@ -46,6 +48,50 @@ class SessionInboxLayoutTest {
     @Test
     fun selectedConversationDoesNotAnnounceAnInactiveRuntime() {
         assertConversationRowFits(width = 360, compact = true, click = false, active = false)
+    }
+
+    @Test
+    fun botAndSessionInboxModesRemainAdjacentActions() {
+        var selected = ChatInboxMode.BOTS
+        compose.setContent {
+            HermesTheme { BotInboxSelector(selected) { selected = it } }
+        }
+
+        compose.onNodeWithText("Sessions").performClick()
+        assertEquals(ChatInboxMode.SESSIONS, selected)
+        compose.onNodeWithText("Bots").performClick()
+        assertEquals(ChatInboxMode.BOTS, selected)
+    }
+
+    @Test
+    fun botRowFitsPhoneAndExposesMessagingState() {
+        compose.setContent {
+            HermesTheme {
+                Surface(Modifier.width(360.dp)) {
+                    BotRow(
+                        bot = BotConversation(
+                            profile = ProfileInfo(name = "coder", displayName = "Code Fox", description = "Builds Android apps"),
+                            latestSession = StoredSession(sessionId = "chat", profile = "coder", title = "Fix the release", lastActive = 10.0),
+                            selected = true,
+                            sourceLabel = "Mac mini",
+                            unread = true,
+                        ),
+                        nowMillis = 20_000L,
+                        onClick = {},
+                    )
+                }
+            }
+        }
+
+        compose.onNode(
+            hasContentDescription("Code Fox", substring = true) and
+                hasContentDescription("Fix the release", substring = true) and
+                hasContentDescription("Mac mini", substring = true) and
+                hasContentDescription("Builds Android apps", substring = true) and
+                hasContentDescription("Selected", substring = true) and
+                hasContentDescription("Active", substring = true) and
+                hasContentDescription("Unread", substring = true),
+        ).assertExists()
     }
 
     @Test
