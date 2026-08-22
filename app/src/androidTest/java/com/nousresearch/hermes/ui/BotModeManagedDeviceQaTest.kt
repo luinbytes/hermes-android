@@ -31,7 +31,6 @@ import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import androidx.test.platform.app.InstrumentationRegistry
 import androidx.test.platform.io.PlatformTestStorageRegistry
-import androidx.test.uiautomator.UiDevice
 import com.nousresearch.hermes.data.AuthMode
 import com.nousresearch.hermes.data.BackendConfig
 import com.nousresearch.hermes.data.BotAgentDraft
@@ -183,19 +182,24 @@ class BotModeManagedDeviceQaTest {
                 Surface(Modifier.fillMaxSize().testTag(QA_ROOT)) { RosterPane(qaState(QaVariant.POPULATED)) }
             }
         }
-        val device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation())
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val automation = instrumentation.uiAutomation
         try {
-            device.setOrientationNatural()
-            device.waitForIdle(5_000)
+            automation.executeShellCommand("settings put system accelerometer_rotation 0").close()
+            automation.executeShellCommand("settings put system user_rotation 0").close()
+            instrumentation.waitForIdleSync()
+            val initialWidth = instrumentation.targetContext.resources.configuration.screenWidthDp
             compose.onNodeWithTag(QA_ROOT).assertExists()
             captureWindow("rotation-natural")
-            device.setOrientationLeft()
-            device.waitForIdle(5_000)
+            automation.executeShellCommand("settings put system user_rotation 1").close()
+            compose.waitUntil(10_000) {
+                instrumentation.targetContext.resources.configuration.screenWidthDp != initialWidth
+            }
             compose.onNodeWithTag(QA_ROOT).assertExists()
             compose.onNodeWithText("Bots").assertExists()
             captureWindow("rotation-left")
         } finally {
-            device.unfreezeRotation()
+            automation.executeShellCommand("settings put system accelerometer_rotation 1").close()
         }
     }
 
