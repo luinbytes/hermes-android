@@ -1,6 +1,7 @@
 package com.nousresearch.hermes.ui
 
 import android.app.UiAutomation
+import android.content.res.Configuration
 import android.graphics.Bitmap
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.Row
@@ -187,8 +188,13 @@ class BotModeManagedDeviceQaTest {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val automation = instrumentation.uiAutomation
         val initialOrientation = instrumentation.targetContext.resources.configuration.orientation
+        val rotated = if (initialOrientation == Configuration.ORIENTATION_PORTRAIT) {
+            UiAutomation.ROTATION_FREEZE_90
+        } else {
+            UiAutomation.ROTATION_FREEZE_0
+        }
         try {
-            assertTrue(automation.setRotation(UiAutomation.ROTATION_FREEZE_90))
+            assertTrue(automation.setRotation(rotated))
             compose.waitUntil(10_000) {
                 instrumentation.targetContext.resources.configuration.orientation != initialOrientation
             }
