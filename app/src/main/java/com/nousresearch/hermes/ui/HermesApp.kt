@@ -113,6 +113,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -131,7 +132,14 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.SmallFloatingActionButton
 import androidx.compose.material3.NavigationDrawerItem
+import androidx.compose.material3.Snackbar
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SwipeToDismissBox
+import androidx.compose.material3.SwipeToDismissBoxValue
 import androidx.compose.material3.rememberDrawerState
+import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
@@ -160,6 +168,7 @@ import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.UriHandler
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.Role
@@ -573,6 +582,7 @@ fun HermesApp(
     val navigator = remember(appNavController) { HermesNavigator(appNavController) }
     val currentEntry by appNavController.currentBackStackEntryAsState()
     var recoveryNotice by remember { mutableStateOf<String?>(null) }
+    val transientMessage = if (state.backend != null) recoveryNotice ?: state.error else null
     LaunchedEffect(
         entryDelivery?.request?.id,
         entryDelivery?.attempt,
@@ -862,15 +872,14 @@ fun HermesApp(
                         )
                     }
                 }
-                recoveryNotice?.let { notice ->
-                    Surface(
-                        modifier = Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(12.dp),
-                        shape = RoundedCornerShape(10.dp),
-                        color = MaterialTheme.colorScheme.errorContainer,
-                    ) {
-                        Text(notice, Modifier.padding(horizontal = 14.dp, vertical = 10.dp))
-                    }
-                }
+                TransientMessageHost(
+                    message = transientMessage,
+                    onConsumed = { message ->
+                        if (recoveryNotice == message) recoveryNotice = null
+                        viewModel.consumeError(message)
+                    },
+                    modifier = Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(12.dp),
+                )
             }
         }
         entryDelivery?.failureMessage?.let { failure ->
@@ -2348,7 +2357,6 @@ internal fun SessionRail(
                     shape = RoundedCornerShape(28.dp),
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
                 )
-                state.error?.let { ErrorBanner(it, Modifier.padding(12.dp)) }
                 state.sessionListError?.let { ErrorBanner(it, Modifier.padding(horizontal = 12.dp)) }
                 LazyColumn(
                     contentPadding = PaddingValues(top = 8.dp, bottom = if (compact) 88.dp else 8.dp),
@@ -3019,7 +3027,6 @@ private fun ChatSurface(
             }
             if (state.loading) CircularProgressIndicator(Modifier.align(Alignment.Center))
         }
-        state.error?.let { ErrorBanner(it, Modifier.padding(horizontal = 12.dp)) }
         state.compatibilityWarning?.let { CompatibilityBanner(it, Modifier.padding(horizontal = 12.dp, vertical = 4.dp)) }
         if (state.runtimeSessionId != null) {
             ModelControls(
@@ -4584,6 +4591,48 @@ private fun ErrorBanner(message: String, modifier: Modifier = Modifier) {
         Icon(Icons.Outlined.ErrorOutline, null, tint = MaterialTheme.colorScheme.error)
         Spacer(Modifier.width(8.dp))
         Text(message, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onErrorContainer)
+    }
+}
+
+@Composable
+@OptIn(ExperimentalMaterial3Api::class)
+internal fun TransientMessageHost(
+    message: String?,
+    onConsumed: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val hostState = remember { SnackbarHostState() }
+    LaunchedEffect(message) {
+        if (message == null) return@LaunchedEffect
+        hostState.showSnackbar(
+            message = message,
+            withDismissAction = true,
+            duration = SnackbarDuration.Long,
+        )
+        onConsumed(message)
+    }
+    SnackbarHost(hostState, modifier) { data ->
+        key(data.visuals.message) {
+            val dismissState = rememberSwipeToDismissBoxState(
+                confirmValueChange = { value ->
+                    if (value != SwipeToDismissBoxValue.Settled) data.dismiss()
+                    true
+                },
+            )
+            SwipeToDismissBox(
+                state = dismissState,
+                backgroundContent = {},
+                modifier = Modifier.testTag("transient-message"),
+            ) {
+                Snackbar(
+                    snackbarData = data,
+                    containerColor = MaterialTheme.colorScheme.errorContainer,
+                    contentColor = MaterialTheme.colorScheme.onErrorContainer,
+                    actionColor = MaterialTheme.colorScheme.onErrorContainer,
+                    dismissActionContentColor = MaterialTheme.colorScheme.onErrorContainer,
+                )
+            }
+        }
     }
 }
 
