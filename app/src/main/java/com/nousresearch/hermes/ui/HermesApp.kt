@@ -2085,7 +2085,7 @@ internal fun scopedToolPaneKey(
 }
 
 @Composable
-private fun SessionRail(
+internal fun SessionRail(
     state: HermesState,
     connection: GatewayConnectionState,
     onRefresh: () -> Unit,

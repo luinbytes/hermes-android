@@ -2,6 +2,12 @@ name: CI
 
 on:
   workflow_dispatch:
+    inputs:
+      managed_device_qa_only:
+        description: Run managed-device Bot Mode QA after a separately green exact-head PR check
+        required: false
+        type: boolean
+        default: false
   push:
     branches: [main, dev]
   pull_request:
@@ -17,6 +23,7 @@ permissions:
 jobs:
   quality:
     name: Tests and lint
+    if: github.event_name != 'workflow_dispatch' || inputs.managed_device_qa_only != true
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -339,7 +346,9 @@ jobs:
   device-tests:
     name: API 28 and API 36 app tests
     if: >-
-      always() && needs.quality.result == 'success' &&
+      always() &&
+      (needs.quality.result == 'success' ||
+       (github.event_name == 'workflow_dispatch' && inputs.managed_device_qa_only)) &&
       (github.event_name == 'workflow_dispatch' ||
        (github.event_name == 'pull_request' && github.base_ref == 'main') ||
        (github.event_name == 'push' && github.ref == 'refs/heads/main' &&
@@ -361,14 +370,33 @@ jobs:
         run: sudo chmod 666 /dev/kvm
       - name: Run Android app matrix
         run: |
-          ./gradlew --no-daemon --no-parallel --max-workers=1 \
-            :app:pixel2Api28DebugAndroidTest \
+          device_tasks=(
+            :app:pixel2Api28DebugAndroidTest
+            :app:pixel2Api36DebugAndroidTest
             :app:pixelTabletApi36DebugAndroidTest
+          )
+          qa_args=()
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.managed_device_qa_only }}" == "true" ]]; then
+            device_tasks=(
+              :app:pixel2Api36DebugAndroidTest
+              :app:pixelTabletApi36DebugAndroidTest
+            )
+            qa_args+=("-Pandroid.testInstrumentationRunnerArguments.class=com.nousresearch.hermes.ui.BotModeManagedDeviceQaTest")
+          fi
+          ./gradlew --no-daemon --no-parallel --max-workers=1 \
+            "${device_tasks[@]}" \
+            "${qa_args[@]}"
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.managed_device_qa_only }}" == "true" ]]; then
+            screenshot_count="$(find app/build/intermediates/managed_device_android_test_additional_output -type f -name 'bot-mode-qa-*.png' | wc -l | tr -d ' ')"
+            test "$screenshot_count" -ge 2
+          fi
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: hermes-android-device-test-results
-          path: app/build/outputs/androidTest-results/**
+          path: |
+            app/build/outputs/androidTest-results/**
+            app/build/intermediates/managed_device_android_test_additional_output/**
           if-no-files-found: warn
           retention-days: 14
 
