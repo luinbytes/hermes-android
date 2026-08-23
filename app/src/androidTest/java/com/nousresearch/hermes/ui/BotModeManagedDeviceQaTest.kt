@@ -51,6 +51,7 @@ import com.nousresearch.hermes.protocol.StoredSession
 import com.nousresearch.hermes.ui.theme.HermesSkin
 import com.nousresearch.hermes.ui.theme.HermesTheme
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
@@ -209,14 +210,17 @@ class BotModeManagedDeviceQaTest {
         state: HermesState = qaState(QaVariant.POPULATED),
         fontScale: Float = 1f,
     ) {
+        val renderedDensity = AtomicReference<Float>()
         compose.setContent {
+            val density = LocalDensity.current
+            SideEffect { renderedDensity.set(density.density) }
             CompositionLocalProvider(LocalDensity provides Density(LocalDensity.current.density, fontScale)) {
                 HermesTheme(skin, darkTheme = true) {
                     Surface(Modifier.fillMaxSize().testTag(QA_ROOT)) { RosterPane(state) }
                 }
             }
         }
-        assertRosterState(state)
+        assertRosterState(state, requireNotNull(renderedDensity.get()))
         captureWindow(name)
     }
 
@@ -289,12 +293,12 @@ class BotModeManagedDeviceQaTest {
         )
     }
 
-    private fun assertRosterState(state: HermesState) {
+    private fun assertRosterState(state: HermesState, density: Float) {
         compose.onNodeWithText("Bots").assertExists()
         compose.onNodeWithText("Sessions").assertExists()
         compose.onNodeWithContentDescription("Refresh conversations").assertExists()
         when {
-            state.sessionListLoading -> compose.onNodeWithText("Code Fox").assertExists()
+            state.sessionListLoading -> compose.onNodeWithText("Code Fox").assertDoesNotExist()
             state.sessionListError != null -> compose.onNodeWithText(state.sessionListError).assertExists()
             state.botCandidates.isEmpty() -> compose.onNodeWithText("NO BOTS YET").assertExists()
             else -> {
@@ -309,7 +313,6 @@ class BotModeManagedDeviceQaTest {
             }
         }
         val refresh = compose.onNodeWithContentDescription("Refresh conversations").fetchSemanticsNode()
-        val density = InstrumentationRegistry.getInstrumentation().targetContext.resources.displayMetrics.density
         assertTrue(refresh.boundsInRoot.width / density >= 48f)
         assertTrue(refresh.boundsInRoot.height / density >= 48f)
         assertTrue(refresh.config.contains(SemanticsProperties.Role))
@@ -321,7 +324,7 @@ class BotModeManagedDeviceQaTest {
         val screenshot = requireNotNull(instrumentation.uiAutomation.takeScreenshot())
         val configuration = instrumentation.targetContext.resources.configuration
         val layout = if (configuration.screenWidthDp < 600) "phone" else "expanded"
-        val outputName = "bot-mode-qa/$layout-api${android.os.Build.VERSION.SDK_INT}-$name.png"
+        val outputName = "bot-mode-qa-$layout-api${android.os.Build.VERSION.SDK_INT}-$name.png"
         PlatformTestStorageRegistry.getInstance().openOutputFile(outputName).use { output ->
             assertTrue(screenshot.compress(Bitmap.CompressFormat.PNG, 100, output))
         }
