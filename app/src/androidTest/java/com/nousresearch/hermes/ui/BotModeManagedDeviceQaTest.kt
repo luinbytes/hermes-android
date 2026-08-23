@@ -1,5 +1,6 @@
 package com.nousresearch.hermes.ui
 
+import android.app.UiAutomation
 import android.graphics.Bitmap
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.Row
@@ -174,6 +175,29 @@ class BotModeManagedDeviceQaTest {
         compose.onNodeWithText("Daily brief").assertExists()
         compose.onNodeWithContentDescription("Run job now").assertExists()
         captureWindow("routines-large-text")
+    }
+
+    @Test
+    fun rosterSurvivesRealDisplayRotation() {
+        compose.setContent {
+            HermesTheme(HermesSkin.NOUS, darkTheme = true) {
+                Surface(Modifier.fillMaxSize().testTag(QA_ROOT)) { RosterPane(qaState(QaVariant.POPULATED)) }
+            }
+        }
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val automation = instrumentation.uiAutomation
+        val initialOrientation = instrumentation.targetContext.resources.configuration.orientation
+        try {
+            assertTrue(automation.setRotation(UiAutomation.ROTATION_FREEZE_90))
+            compose.waitUntil(10_000) {
+                instrumentation.targetContext.resources.configuration.orientation != initialOrientation
+            }
+            compose.onNodeWithTag(QA_ROOT).assertExists()
+            compose.onNodeWithText("Bots").assertExists()
+            captureWindow("rotation")
+        } finally {
+            automation.setRotation(UiAutomation.ROTATION_UNFREEZE)
+        }
     }
 
     private fun captureRoster(
