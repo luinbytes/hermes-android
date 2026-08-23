@@ -249,7 +249,8 @@ class SessionInboxLayoutTest {
 
         compose.onNodeWithText("ENABLED").assertIsDisplayed()
         compose.onNodeWithText("NEXT 2026-08-23T21:00:00+01:00").assertIsDisplayed()
-        compose.onNodeWithText("DELIVER telegram:7071463").assertIsDisplayed()
+        val deliver = compose.onNodeWithText("DELIVER telegram:7071463").assertIsDisplayed().fetchSemanticsNode()
+        assertTrue("Delivery metadata collapsed to ${deliver.boundsInRoot.width}px", deliver.boundsInRoot.width >= 120f)
     }
 
     @Test
