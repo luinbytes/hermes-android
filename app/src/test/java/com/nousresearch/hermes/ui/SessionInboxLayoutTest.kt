@@ -2,6 +2,7 @@ package com.nousresearch.hermes.ui
 
 import android.Manifest
 import android.app.NotificationManager
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.width
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.CompositionLocalProvider
@@ -25,6 +26,7 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import com.nousresearch.hermes.protocol.StoredSession
+import com.nousresearch.hermes.protocol.StatusResponse
 import com.nousresearch.hermes.protocol.BotSessionSummary
 import com.nousresearch.hermes.protocol.ProfileInfo
 import com.nousresearch.hermes.protocol.BotGroupEntry
@@ -42,6 +44,7 @@ import com.nousresearch.hermes.protocol.CronJob
 import com.nousresearch.hermes.protocol.CronJobSchedule
 import com.nousresearch.hermes.platform.createHermesNotificationChannels
 import com.nousresearch.hermes.ui.theme.HermesTheme
+import com.nousresearch.hermes.ui.navigation.HermesRoute
 import java.time.Instant
 import java.time.ZoneId
 import java.text.SimpleDateFormat
@@ -63,6 +66,31 @@ import kotlinx.serialization.json.put
 class SessionInboxLayoutTest {
     @get:Rule
     val compose = createComposeRule()
+
+    @Test
+    fun authenticatedStartupUsesASeparateRestoringScreenAtLargeText() {
+        val backend = BackendConfig("mac", "Mac mini", "https://mac.test", AuthMode.TOKEN)
+        val authenticated = HermesState(backend = backend, status = StatusResponse(), currentProfile = "default")
+        assertEquals(HermesRoute.Onboarding, initialHermesRoute(false, authenticated))
+        assertEquals(HermesRoute.SessionAtlas("mac", "default"), initialHermesRoute(true, authenticated))
+
+        compose.setContent {
+            CompositionLocalProvider(LocalDensity provides Density(LocalDensity.current.density, 1.8f)) {
+                HermesTheme {
+                    Surface(Modifier.width(360.dp).testTag("startup-screen")) {
+                        HermesStartupScreen(Modifier.fillMaxSize())
+                    }
+                }
+            }
+        }
+
+        compose.onNodeWithTag("startup-screen").assertIsDisplayed()
+        compose.onNodeWithText("HERMES").assertIsDisplayed()
+        compose.onNodeWithText("RESTORING YOUR WORKSPACE").assertIsDisplayed()
+        compose.onNodeWithContentDescription("Restoring Hermes workspace").assertIsDisplayed()
+        compose.onNodeWithText("Checking your saved Hermes backend and secure session.").assertIsDisplayed()
+        compose.onNodeWithText("CONNECT TO HERMES").assertDoesNotExist()
+    }
 
     @Test
     fun transientMessagesRenderOnceAndCanBeSwipedAway() {
