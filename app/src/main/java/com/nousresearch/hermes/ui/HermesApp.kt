@@ -185,6 +185,7 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.input.ImeAction
@@ -583,6 +584,9 @@ fun HermesApp(
     val currentEntry by appNavController.currentBackStackEntryAsState()
     var recoveryNotice by remember { mutableStateOf<String?>(null) }
     val transientMessage = if (state.backend != null) recoveryNotice ?: state.error else null
+    val initialRoute = remember(startupReady, state.backend?.id, state.status != null) {
+        initialHermesRoute(startupReady, state)
+    }
     LaunchedEffect(
         entryDelivery?.request?.id,
         entryDelivery?.attempt,
@@ -816,7 +820,7 @@ fun HermesApp(
                 NousBackdrop(skin = skin, modifier = Modifier.fillMaxSize())
                 NavHost(
                     navController = appNavController,
-                    startDestination = HermesRoute.Onboarding,
+                    startDestination = initialRoute,
                     modifier = Modifier.fillMaxSize(),
                 ) {
                     composable<HermesRoute.Onboarding> {
@@ -872,14 +876,23 @@ fun HermesApp(
                         )
                     }
                 }
-                TransientMessageHost(
-                    message = transientMessage,
-                    onConsumed = { message ->
-                        if (recoveryNotice == message) recoveryNotice = null
-                        viewModel.consumeError(message)
-                    },
-                    modifier = Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(12.dp),
-                )
+                if (startupReady) {
+                    TransientMessageHost(
+                        message = transientMessage,
+                        onConsumed = { message ->
+                            if (recoveryNotice == message) recoveryNotice = null
+                            viewModel.consumeError(message)
+                        },
+                        modifier = Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(12.dp),
+                    )
+                } else {
+                    Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+                        Box(Modifier.fillMaxSize()) {
+                            NousBackdrop(skin = skin, modifier = Modifier.fillMaxSize())
+                            HermesStartupScreen(Modifier.fillMaxSize())
+                        }
+                    }
+                }
             }
         }
         entryDelivery?.failureMessage?.let { failure ->
@@ -902,6 +915,43 @@ fun HermesApp(
                         },
                     ) { Text("Discard") }
                 },
+            )
+        }
+    }
+}
+
+internal fun initialHermesRoute(startupReady: Boolean, state: HermesState): HermesRoute =
+    state.backend?.takeIf { startupReady && state.status != null }?.let { backend ->
+        HermesRoute.SessionAtlas(backend.id, state.currentProfile)
+    } ?: HermesRoute.Onboarding
+
+@Composable
+internal fun HermesStartupScreen(modifier: Modifier = Modifier) {
+    Box(
+        modifier.statusBarsPadding().navigationBarsPadding().padding(24.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(
+            modifier = Modifier.widthIn(max = 360.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            BrandGlyph()
+            Text(
+                "HERMES",
+                style = MaterialTheme.typography.headlineLarge,
+                modifier = Modifier.semantics { heading() },
+            )
+            CircularProgressIndicator(
+                modifier = Modifier.size(30.dp).semantics { contentDescription = "Restoring Hermes workspace" },
+                strokeWidth = 3.dp,
+            )
+            Text("RESTORING YOUR WORKSPACE", style = MaterialTheme.typography.labelMedium)
+            Text(
+                "Checking your saved Hermes backend and secure session.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
             )
         }
     }
