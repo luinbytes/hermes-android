@@ -70,7 +70,10 @@ class SessionInboxLayoutTest {
         compose.mainClock.autoAdvance = false
         compose.setContent {
             HermesTheme {
-                TransientMessageHost(message.value, onConsumed = { message.value = null })
+                TransientMessageHost(
+                    message = message.value,
+                    onConsumed = { consumed -> if (message.value == consumed) message.value = null },
+                )
             }
         }
 
