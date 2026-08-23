@@ -275,6 +275,7 @@ class BotModeManagedDeviceQaTest {
             onArchiveSession = { _, _ -> },
             onPinSession = { _, _ -> },
             onNewSession = {},
+            onNewBotSession = {},
             onArtifacts = {},
             onAutomations = {},
             onManage = {},

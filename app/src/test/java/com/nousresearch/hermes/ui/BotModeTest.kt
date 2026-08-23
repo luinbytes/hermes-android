@@ -78,4 +78,27 @@ class BotModeTest {
         assertTrue(bot.matches("battery"))
         assertFalse(bot.matches("accounting"))
     }
+
+    @Test
+    fun `bot resumes its most recent local session instead of an older canonical chat`() {
+        val recent = StoredSession(sessionId = "recent", profile = "coder", title = "Latest work", lastActive = 30.0)
+        val bot = botConversations(
+            profiles = listOf(
+                ProfileInfo(
+                    name = "coder",
+                    canonicalSession = com.nousresearch.hermes.protocol.BotSessionSummary(
+                        id = "canonical",
+                        title = "Bot Chat",
+                        lastActive = 10.0,
+                    ),
+                ),
+            ),
+            sessions = listOf(recent),
+            selectedSession = null,
+        ).single()
+
+        assertEquals("recent", bot.latestSession?.durableId)
+        assertEquals(recent, bot.localResumeSession(activeBackendId = "local"))
+        assertEquals(null, bot.copy(backendId = "remote").localResumeSession(activeBackendId = "local"))
+    }
 }

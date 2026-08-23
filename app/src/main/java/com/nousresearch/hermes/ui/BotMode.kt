@@ -38,6 +38,11 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.PlainTooltip
+import androidx.compose.material3.TooltipBox
+import androidx.compose.material3.TooltipDefaults
+import androidx.compose.material3.rememberTooltipState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
@@ -72,6 +77,7 @@ import androidx.compose.material.icons.outlined.Group
 import androidx.compose.material.icons.outlined.Schedule
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.AttachFile
+import androidx.compose.material.icons.outlined.Add
 import com.nousresearch.hermes.protocol.BotGroupEntry
 import com.nousresearch.hermes.protocol.BotGroupAttachment
 import com.nousresearch.hermes.protocol.BotGroupBlockingRequest
@@ -149,6 +155,9 @@ internal data class BotConversation(
 }
 
 internal enum class ChatInboxMode { BOTS, SESSIONS }
+
+internal fun BotConversation.localResumeSession(activeBackendId: String?): StoredSession? =
+    latestSession?.takeIf { backendId.isBlank() || backendId == activeBackendId }
 
 internal fun ProfileInfo.botHiddenOrNull(): Boolean? = runCatching {
     uiMeta?.get("hermes-bots")?.jsonObject?.get("hidden")?.jsonPrimitive?.booleanOrNull
@@ -278,8 +287,10 @@ internal fun botConversations(
         .groupBy { it.profile.normalizedProfile() }
         .mapValues { (_, profileSessions) -> profileSessions.maxByOrNull(StoredSession::lastActive) }
     return profiles.map { profile ->
-        val latest = (profile.canonicalSession ?: profile.preferredSession ?: profile.lastSession)?.toStoredSession(profile.name)
-            ?: latestByProfile[profile.name.normalizedProfile()]
+        val latest = listOfNotNull(
+            (profile.canonicalSession ?: profile.preferredSession ?: profile.lastSession)?.toStoredSession(profile.name),
+            latestByProfile[profile.name.normalizedProfile()],
+        ).maxByOrNull(StoredSession::lastActive)
         BotConversation(
             profile = profile,
             latestSession = latest,
@@ -302,11 +313,13 @@ internal fun botConversations(
     unreadProfiles: Set<String> = emptySet(),
 ): List<BotConversation> = candidates.map { candidate ->
     val local = candidate.backendId == activeBackendId
-    val latest = (candidate.profile.canonicalSession ?: candidate.profile.preferredSession ?: candidate.profile.lastSession)
-        ?.toStoredSession(candidate.profile.name)
-        ?: sessions.takeIf { local }?.filter {
+    val latest = listOfNotNull(
+        (candidate.profile.canonicalSession ?: candidate.profile.preferredSession ?: candidate.profile.lastSession)
+            ?.toStoredSession(candidate.profile.name),
+        sessions.takeIf { local }?.filter {
             it.profile.normalizedProfile() == candidate.profile.name.normalizedProfile()
-        }?.maxByOrNull(StoredSession::lastActive)
+        }?.maxByOrNull(StoredSession::lastActive),
+    ).maxByOrNull(StoredSession::lastActive)
     BotConversation(
         profile = candidate.profile,
         latestSession = latest,
@@ -335,6 +348,7 @@ private fun BotSessionSummary.toStoredSession(profile: String): StoredSession = 
     lastActive = lastActive,
 )
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun BotRow(
     bot: BotConversation,
@@ -344,6 +358,7 @@ internal fun BotRow(
     onToggleHidden: (() -> Unit)? = null,
     onEdit: (() -> Unit)? = null,
     onRoutines: (() -> Unit)? = null,
+    onNewSession: (() -> Unit)? = null,
     avatarData: String? = null,
 ) {
     val active = bot.isActive(nowMillis, busyProfile)
@@ -372,6 +387,7 @@ internal fun BotRow(
                     customActions = listOfNotNull(
                         onEdit?.let { edit -> CustomAccessibilityAction("Edit ${bot.name}") { edit(); true } },
                         onRoutines?.let { routines -> CustomAccessibilityAction("Open ${bot.name} routines") { routines(); true } },
+                        onNewSession?.let { start -> CustomAccessibilityAction("Start new session with ${bot.name}") { start(); true } },
                         onToggleHidden?.let { toggle ->
                             CustomAccessibilityAction(if (bot.hidden) "Unhide ${bot.name}" else "Hide ${bot.name}") {
                                 toggle()
@@ -445,6 +461,15 @@ internal fun BotRow(
             if (active) {
                 Spacer(Modifier.width(8.dp))
                 Box(Modifier.size(8.dp).clip(CircleShape).background(MaterialTheme.colorScheme.tertiary))
+            }
+            onNewSession?.let { start ->
+                TooltipBox(
+                    positionProvider = TooltipDefaults.rememberPlainTooltipPositionProvider(),
+                    tooltip = { PlainTooltip { Text("Start new session") } },
+                    state = rememberTooltipState(),
+                ) {
+                    IconButton(onClick = start) { Icon(Icons.Outlined.Add, "Start new session with ${bot.name}") }
+                }
             }
             onEdit?.let { edit ->
                 IconButton(onClick = edit) { Icon(Icons.Outlined.Edit, "Edit ${bot.name}") }

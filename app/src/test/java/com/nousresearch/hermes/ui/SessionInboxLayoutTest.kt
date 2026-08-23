@@ -92,6 +92,7 @@ class SessionInboxLayoutTest {
 
     @Test
     fun botRowFitsPhoneAndExposesMessagingState() {
+        var newSessions = 0
         compose.setContent {
             HermesTheme {
                 Surface(Modifier.width(360.dp)) {
@@ -114,6 +115,7 @@ class SessionInboxLayoutTest {
                         nowMillis = 20_000L,
                         onClick = {},
                         onToggleHidden = {},
+                        onNewSession = { newSessions++ },
                     )
                 }
             }
@@ -130,6 +132,8 @@ class SessionInboxLayoutTest {
                 hasContentDescription("Offline", substring = true),
         ).assertExists()
         compose.onNodeWithText("OFFLINE · LAST KNOWN", useUnmergedTree = true).assertExists()
+        compose.onNodeWithContentDescription("Start new session with Code Fox", useUnmergedTree = true).performClick()
+        assertEquals(1, newSessions)
     }
 
     @Test

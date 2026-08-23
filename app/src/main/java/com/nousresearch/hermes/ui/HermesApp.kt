@@ -1711,6 +1711,7 @@ private fun HermesWorkspace(
                             onArchiveSession = onArchiveSession,
                             onPinSession = onPinSession,
                             onNewSession = { createConversation(null) },
+                            onNewBotSession = { createConversation(it.profile.name) },
                             onArtifacts = { navigator.openArtifacts(backendId, profileId) },
                             onAutomations = { navigator.openAutomations(backendId, profileId) },
                             onManage = { navigator.openManage(backendId, profileId) },
@@ -1763,6 +1764,7 @@ private fun HermesWorkspace(
                         onArchiveSession = onArchiveSession,
                         onPinSession = onPinSession,
                         onNewSession = { createConversation(null) },
+                        onNewBotSession = { createConversation(it.profile.name) },
                         onArtifacts = { navigator.openArtifacts(backendId, profileId) },
                         onAutomations = { navigator.openAutomations(backendId, profileId) },
                         onManage = { navigator.openManage(backendId, profileId) },
@@ -2099,6 +2101,7 @@ internal fun SessionRail(
     onArchiveSession: (String, StoredSession) -> Unit,
     onPinSession: (String, StoredSession) -> Unit,
     onNewSession: () -> Unit,
+    onNewBotSession: (BotConversation) -> Unit,
     onArtifacts: () -> Unit,
     onAutomations: () -> Unit,
     onManage: () -> Unit,
@@ -2183,7 +2186,7 @@ internal fun SessionRail(
     }
     val openBot: (BotConversation) -> Unit = { bot ->
         unreadProfiles = unreadProfiles - bot.sourceKey
-        onBot(bot)
+        bot.localResumeSession(state.backend?.id)?.let(onSession) ?: onBot(bot)
     }
     LaunchedEffect(allBots.map { it.sourceKey to it.activityTimestamp }) {
         if (activityWatermarks.isEmpty()) {
@@ -2366,6 +2369,11 @@ internal fun SessionRail(
                                 },
                                 onEdit = if (bot.backendId == state.backend?.id) ({ onEditBot(bot) }) else null,
                                 onRoutines = if (bot.backendId == state.backend?.id) ({ onBotRoutines(bot) }) else null,
+                                onNewSession = if (bot.backendId.isBlank() || bot.backendId == state.backend?.id) {
+                                    { onNewBotSession(bot) }
+                                } else {
+                                    null
+                                },
                                 avatarData = botAvatars[bot.sourceKey],
                             )
                         }
