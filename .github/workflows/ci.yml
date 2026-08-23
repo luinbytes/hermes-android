@@ -372,10 +372,15 @@ jobs:
         run: sudo chmod 666 /dev/kvm
       - name: Run Android app matrix
         run: |
+          qa_args=()
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.managed_device_qa_only }}" == "true" ]]; then
+            qa_args+=("-Pandroid.testInstrumentationRunnerArguments.class=com.nousresearch.hermes.ui.BotModeManagedDeviceQaTest")
+          fi
           ./gradlew --no-daemon --no-parallel --max-workers=1 \
             :app:pixel2Api28DebugAndroidTest \
             :app:pixel2Api36DebugAndroidTest \
-            :app:pixelTabletApi36DebugAndroidTest
+            :app:pixelTabletApi36DebugAndroidTest \
+            "${qa_args[@]}"
       - uses: actions/upload-artifact@v4
         if: always()
         with:

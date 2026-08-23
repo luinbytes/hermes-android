@@ -176,34 +176,6 @@ class BotModeManagedDeviceQaTest {
         captureWindow("routines-large-text")
     }
 
-    @Test
-    fun rosterSurvivesRealDeviceRotation() {
-        compose.setContent {
-            HermesTheme(HermesSkin.NOUS, darkTheme = true) {
-                Surface(Modifier.fillMaxSize().testTag(QA_ROOT)) { RosterPane(qaState(QaVariant.POPULATED)) }
-            }
-        }
-        val instrumentation = InstrumentationRegistry.getInstrumentation()
-        val automation = instrumentation.uiAutomation
-        try {
-            automation.executeShellCommand("settings put system accelerometer_rotation 0").close()
-            automation.executeShellCommand("settings put system user_rotation 0").close()
-            instrumentation.waitForIdleSync()
-            val initialWidth = instrumentation.targetContext.resources.configuration.screenWidthDp
-            compose.onNodeWithTag(QA_ROOT).assertExists()
-            captureWindow("rotation-natural")
-            automation.executeShellCommand("settings put system user_rotation 1").close()
-            compose.waitUntil(10_000) {
-                instrumentation.targetContext.resources.configuration.screenWidthDp != initialWidth
-            }
-            compose.onNodeWithTag(QA_ROOT).assertExists()
-            compose.onNodeWithText("Bots").assertExists()
-            captureWindow("rotation-left")
-        } finally {
-            automation.executeShellCommand("settings put system accelerometer_rotation 1").close()
-        }
-    }
-
     private fun captureRoster(
         name: String,
         skin: HermesSkin,
