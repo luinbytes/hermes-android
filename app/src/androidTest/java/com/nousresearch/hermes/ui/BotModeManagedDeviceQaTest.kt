@@ -1,8 +1,8 @@
 package com.nousresearch.hermes.ui
 
 import android.app.UiAutomation
+import android.content.res.Configuration
 import android.graphics.Bitmap
-import android.view.Surface
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -187,16 +187,12 @@ class BotModeManagedDeviceQaTest {
         }
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val automation = instrumentation.uiAutomation
-        val initialRotation = requireNotNull(instrumentation.targetContext.display).rotation
-        val rotated = if (initialRotation == Surface.ROTATION_0) {
-            UiAutomation.ROTATION_FREEZE_90
-        } else {
-            UiAutomation.ROTATION_FREEZE_0
-        }
+        val initialOrientation = instrumentation.targetContext.resources.configuration.orientation
         try {
-            assertTrue(automation.setRotation(rotated))
+            assertTrue(automation.setRotation(UiAutomation.ROTATION_FREEZE_90))
             compose.waitUntil(10_000) {
-                instrumentation.targetContext.display?.rotation != initialRotation
+                instrumentation.targetContext.resources.configuration.orientation != initialOrientation &&
+                    instrumentation.targetContext.resources.configuration.orientation != Configuration.ORIENTATION_UNDEFINED
             }
             compose.onNodeWithTag(QA_ROOT).assertExists()
             compose.onNodeWithText("Bots").assertExists()
