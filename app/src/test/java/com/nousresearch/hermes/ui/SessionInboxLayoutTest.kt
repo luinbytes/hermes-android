@@ -86,7 +86,8 @@ class SessionInboxLayoutTest {
         compose.onNodeWithText("Job was cancelled").assertDoesNotExist()
 
         message.value = "Another error"
-        compose.mainClock.advanceTimeByFrame()
+        compose.mainClock.advanceTimeBy(1_000)
+        compose.waitForIdle()
         compose.onNodeWithText("Another error").assertExists()
         compose.mainClock.advanceTimeBy(20_000)
         compose.waitForIdle()
