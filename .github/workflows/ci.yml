@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       managed_device_qa_only:
-        description: Run managed-device and benchmark QA after a separately green exact-head PR check
+        description: Run managed-device Bot Mode QA after a separately green exact-head PR check
         required: false
         type: boolean
         default: false
@@ -386,6 +386,10 @@ jobs:
           ./gradlew --no-daemon --no-parallel --max-workers=1 \
             "${device_tasks[@]}" \
             "${qa_args[@]}"
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.managed_device_qa_only }}" == "true" ]]; then
+            screenshot_count="$(find app/build/intermediates/managed_device_android_test_additional_output -type f -name 'bot-mode-qa-*.png' | wc -l | tr -d ' ')"
+            test "$screenshot_count" -ge 2
+          fi
       - uses: actions/upload-artifact@v4
         if: always()
         with:
