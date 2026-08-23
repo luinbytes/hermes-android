@@ -29,6 +29,8 @@ class SettingsSeparationTest {
                     onBiometricReentryChange = {},
                     skin = HermesSkin.NOUS,
                     onSkinChange = {},
+                    botModeEnabled = true,
+                    onBotModeEnabledChange = {},
                     onBack = null,
                 )
             }

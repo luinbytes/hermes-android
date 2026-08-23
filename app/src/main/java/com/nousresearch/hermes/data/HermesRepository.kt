@@ -23,6 +23,21 @@ import com.nousresearch.hermes.protocol.BillingChargeStatusResponse
 import com.nousresearch.hermes.protocol.BillingMutationResponse
 import com.nousresearch.hermes.protocol.BillingStateResponse
 import com.nousresearch.hermes.protocol.BillingStepUpVerification
+import com.nousresearch.hermes.protocol.BotSessionPage
+import com.nousresearch.hermes.protocol.BotSessionSummary
+import com.nousresearch.hermes.protocol.BOT_GROUP_META_KEY
+import com.nousresearch.hermes.protocol.BotGroupMember
+import com.nousresearch.hermes.protocol.BotGroupAttachment
+import com.nousresearch.hermes.protocol.BotGroupBlockingRequest
+import com.nousresearch.hermes.protocol.BotGroupQuestion
+import com.nousresearch.hermes.protocol.BotGroupCandidate
+import com.nousresearch.hermes.protocol.BotGroupCandidateResult
+import com.nousresearch.hermes.protocol.BotGroupEntry
+import com.nousresearch.hermes.protocol.BotGroupRoom
+import com.nousresearch.hermes.protocol.BotGroupSpeaker
+import com.nousresearch.hermes.protocol.BotGroupSnapshot
+import com.nousresearch.hermes.protocol.BotGroupUiState
+import com.nousresearch.hermes.protocol.BotGroupStranded
 import com.nousresearch.hermes.protocol.CronJob
 import com.nousresearch.hermes.protocol.CronJobCreatePayload
 import com.nousresearch.hermes.protocol.CronJobUpdates
@@ -35,6 +50,7 @@ import com.nousresearch.hermes.protocol.GatewayConnectionState
 import com.nousresearch.hermes.protocol.HermesGatewayClient
 import com.nousresearch.hermes.protocol.HermesRpcException
 import com.nousresearch.hermes.protocol.ImageAttachResult
+import com.nousresearch.hermes.protocol.ImageGenerationResult
 import com.nousresearch.hermes.protocol.ModelOptionsResult
 import com.nousresearch.hermes.protocol.OAuthProvider
 import com.nousresearch.hermes.protocol.McpCatalogEntry
@@ -44,8 +60,13 @@ import com.nousresearch.hermes.protocol.McpServerTestResponse
 import com.nousresearch.hermes.protocol.MessagingPlatformInfo
 import com.nousresearch.hermes.protocol.MessagingPlatformTestResponse
 import com.nousresearch.hermes.protocol.PdfAttachResult
+import com.nousresearch.hermes.protocol.PetGallery
 import com.nousresearch.hermes.protocol.ProfileCreatePayload
+import com.nousresearch.hermes.protocol.ProfileAsset
+import com.nousresearch.hermes.protocol.ProfileConfigureResult
+import com.nousresearch.hermes.protocol.ProfileDescription
 import com.nousresearch.hermes.protocol.ProfileInfo
+import com.nousresearch.hermes.protocol.ProfilesResponse
 import com.nousresearch.hermes.protocol.ProtocolMessage
 import com.nousresearch.hermes.protocol.PromptSubmitResult
 import com.nousresearch.hermes.protocol.RollbackCheckpoint
@@ -85,6 +106,7 @@ import com.nousresearch.hermes.platform.mergeSharedText
 import com.nousresearch.hermes.security.DiagnosticRedactor
 import java.util.UUID
 import java.math.BigDecimal
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
@@ -104,11 +126,43 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.joinAll
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.int
 import kotlinx.serialization.json.put
+
+internal fun botHiddenConfigureParams(profile: ProfileInfo, hidden: Boolean) = buildJsonObject {
+    val existing = runCatching { profile.uiMeta?.get("hermes-bots")?.jsonObject }.getOrNull().orEmpty()
+    put("name", profile.name)
+    put("ui_meta", buildJsonObject {
+        put("hermes-bots", buildJsonObject {
+            existing.forEach(::put)
+            put("hidden", hidden)
+        })
+    })
+    put("ui_meta_expected_revisions", buildJsonObject {
+        put("hermes-bots", profile.uiMetaRevisions["hermes-bots"] ?: 0L)
+    })
+}
+
+internal fun HermesState.isActiveCanonicalBotChat(): Boolean {
+    val active = activeStoredSession ?: return false
+    if (active.rootTitle == BOT_CHAT_TITLE || active.title == BOT_CHAT_TITLE) return true
+    val canonical = profiles.firstOrNull {
+        it.name.normalizedProfile() == active.profile.normalizedProfile()
+    }?.canonicalSession ?: return false
+    return active.durableId == canonical.id || active.durableId == canonical.resolvedId
+}
 
 data class HermesState(
     val backend: BackendConfig? = null,
@@ -117,6 +171,8 @@ data class HermesState(
     val sessions: List<StoredSession> = emptyList(),
     val sessionSearchResults: List<SessionSearchHit> = emptyList(),
     val sessionSearchLoading: Boolean = false,
+    val sessionListLoading: Boolean = false,
+    val sessionListError: String? = null,
     val sessionSearchQuery: String = "",
     val activeStoredSession: StoredSession? = null,
     val runtimeSessionId: String? = null,
@@ -154,6 +210,8 @@ data class HermesState(
     val cronJobs: List<CronJob> = emptyList(),
     val cronRuns: Map<String, List<StoredSession>> = emptyMap(),
     val profiles: List<ProfileInfo> = emptyList(),
+    val botGroups: BotGroupUiState = BotGroupUiState(),
+    val botCandidates: List<BotGroupCandidate> = emptyList(),
     val activeProfile: String = "default",
     val currentProfile: String = "default",
     val managementLoading: Boolean = false,
@@ -259,6 +317,25 @@ data class ProfileIdentityDraft(
     val model: String,
 )
 
+data class BotAgentDraft(
+    val name: String,
+    val description: String = "",
+    val soul: String = "",
+    val provider: String = "",
+    val model: String = "",
+    val disabledSkills: Set<String> = emptySet(),
+    val enabledToolsets: Set<String> = emptySet(),
+    val enabledMcpServers: Set<String> = emptySet(),
+)
+
+data class BotDirectMessage(
+    val id: String,
+    val role: String,
+    val text: String,
+)
+
+data class BotDirectChat(val messages: List<BotDirectMessage>)
+
 data class EntryAuthoritySnapshot(
     val profileIds: Set<String>,
     val cronJobIds: Set<String>,
@@ -283,6 +360,21 @@ private data class ProviderRefreshSnapshot(
     val env: Map<String, EnvVarInfo>,
     val oauthProviders: List<OAuthProvider>,
     val providerAccountsSupported: Boolean,
+)
+
+private data class BotProfileKey(val backendId: String, val profile: String)
+private data class BotGroupTurnResult(
+    val text: String? = null,
+    val messageId: String? = null,
+    val strandedBefore: Int? = null,
+    val notice: String? = null,
+    val completed: Boolean = false,
+)
+private data class BotGroupSessionState(val session: BotSessionSummary, val state: SessionResumeResult)
+private data class BotGroupSyncTarget(
+    val backend: BackendConfig,
+    val expectedRevision: Long?,
+    val snapshot: BotGroupSnapshot,
 )
 
 enum class DiagnosticAction(val wireName: String) {
@@ -362,8 +454,25 @@ class HermesRepository @Inject constructor(
     private val sessionSearchLock = Any()
     private val sessionSearchGeneration = AtomicLong()
     private val sessionListGeneration = AtomicLong()
+    private val sessionListPreflightGeneration = AtomicLong()
     private val sessionListRefreshGeneration = AtomicLong()
+    private val visibleSessionListRefreshGeneration = AtomicLong()
+    private val silentSessionListRefreshGeneration = AtomicLong()
+    private val pendingSilentSessionListRefresh = AtomicBoolean()
+    private val sessionListRefreshPriorityMutex = Mutex()
     private val backendCredentialGeneration = AtomicLong()
+    private val profileRefreshGeneration = AtomicLong()
+    private val botRosterRefreshGeneration = AtomicLong()
+    private val botRosterCredentialGenerations = ConcurrentHashMap<String, AtomicLong>()
+    private val botRosterCache = ConcurrentHashMap<String, List<ProfileInfo>>()
+    private val botRosterMutex = Mutex()
+    private val canonicalChatMutexes = ConcurrentHashMap<BotProfileKey, Mutex>()
+    private val pendingBotCreations = ConcurrentHashMap.newKeySet<BotProfileKey>()
+    private val botGroupMutex = Mutex()
+    private val botGroupRuns = ConcurrentHashMap<String, AtomicLong>()
+    private val botGroupMutationGeneration = AtomicLong()
+    private var botGroupSyncJob: Job? = null
+    private var pendingBotGroupSnapshot: BotGroupSnapshot? = null
     private val sessionListMutationMutex = Mutex()
     private var slashCompletionJob: Job? = null
     private var queueDrainJob: Job? = null
@@ -397,6 +506,11 @@ class HermesRepository @Inject constructor(
             combine(backendRegistry.backends, backendRegistry.activeBackendId) { backends, activeId ->
                 backends to backends.firstOrNull { it.id == activeId }
             }.collectLatest { (backends, backend) ->
+                botRosterMutex.withLock {
+                    val savedIds = backends.mapTo(mutableSetOf(), BackendConfig::id)
+                    botRosterCache.keys.retainAll(savedIds)
+                    botRosterCredentialGenerations.keys.retainAll(savedIds)
+                }
                 billingAccountMutex.withLock {
                     if (backend == null) {
                         mutableStartupReady.value = true
@@ -430,6 +544,11 @@ class HermesRepository @Inject constructor(
                 val eventSessionId = event.sessionId?.takeIf(String::isNotBlank)
                 val runtimeId = current.runtimeSessionId
                 val acceptsEvent = shouldAcceptRuntimeEvent(current.restoration.status, runtimeId, event.sessionId)
+                val sessionInfo = if (event.type == "session.info" && event.payload != null) {
+                    runCatching { json.decodeFromJsonElement(SessionRuntimeInfo.serializer(), event.payload) }.getOrNull()
+                } else {
+                    null
+                }
                 if (
                     event.type == "billing.step_up.verification" &&
                     event.payload != null &&
@@ -461,9 +580,7 @@ class HermesRepository @Inject constructor(
                 }
                 if (acceptsEvent) {
                     val runtimeInfo = when {
-                        event.type == "session.info" && event.payload != null -> runCatching {
-                            json.decodeFromJsonElement(SessionRuntimeInfo.serializer(), event.payload)
-                        }.getOrDefault(current.runtimeInfo)
+                        sessionInfo != null -> sessionInfo
                         event.type == "message.start" -> current.runtimeInfo.copy(running = true)
                         event.type == "message.complete" -> current.runtimeInfo.copy(running = false)
                         else -> current.runtimeInfo
@@ -512,6 +629,9 @@ class HermesRepository @Inject constructor(
                         scheduleQueueDrain()
                     }
                 }
+                if (event.type == "message.complete" || sessionInfo?.running == false) {
+                    scope.launch { refreshSessions(showLoading = false) }
+                }
             }
         }
         scope.launch {
@@ -542,6 +662,7 @@ class HermesRepository @Inject constructor(
             )
             try {
                 val status = dashboardConnector.loginValidateAndSave(config, username, password, passwordProvider)
+                invalidateBotRoster(config.id)
                 val saved = config.copy(lastHermesVersion = status.hermesVersion ?: status.version)
                 connect(saved)
                 status
@@ -556,44 +677,91 @@ class HermesRepository @Inject constructor(
     suspend fun discoverDashboardPasswordProviders(config: BackendConfig): List<DashboardAuthProvider> =
         dashboardConnector.discoverPasswordProviders(config)
 
-    suspend fun refreshSessions() {
+    suspend fun refreshSessions(showLoading: Boolean = true) {
+        val preflightGeneration = if (showLoading) {
+            sessionListPreflightGeneration.incrementAndGet()
+        } else {
+            sessionListPreflightGeneration.get()
+        }
         val requestCredentialGeneration = backendCredentialGeneration.get()
-        val (backend, token) = activeCredentials(allowRecovery = true)
+        val requestBackendId = mutableState.value.backend?.id
+        val credentials = runCatching { activeCredentials(allowRecovery = true) }.getOrElse { error ->
+            if (error is CancellationException) throw error
+            if (
+                backendCredentialGeneration.get() == requestCredentialGeneration &&
+                sessionListPreflightGeneration.get() == preflightGeneration &&
+                mutableState.value.backend?.id == requestBackendId &&
+                (showLoading || error.isSessionAuthenticationFailure())
+            ) {
+                failSessionListRefresh(error)
+            }
+            return
+        }
+        val (backend, token) = credentials
         if (
             backendCredentialGeneration.get() != requestCredentialGeneration ||
             mutableState.value.backend?.id != backend.id
         ) return
         val requestGeneration = sessionListGeneration.get()
-        val refreshGeneration = sessionListRefreshGeneration.incrementAndGet()
-        val requestOpenSessionGeneration = openSessionGeneration.get()
+        val refreshGeneration = sessionListRefreshPriorityMutex.withLock {
+            if (
+                backendCredentialGeneration.get() != requestCredentialGeneration ||
+                mutableState.value.backend?.id != backend.id
+            ) {
+                null
+            } else if (
+                !showLoading &&
+                (visibleSessionListRefreshGeneration.get() != 0L || silentSessionListRefreshGeneration.get() != 0L)
+            ) {
+                pendingSilentSessionListRefresh.set(true)
+                null
+            } else {
+                sessionListRefreshGeneration.incrementAndGet().also {
+                    if (showLoading) {
+                        visibleSessionListRefreshGeneration.set(it)
+                        silentSessionListRefreshGeneration.set(0L)
+                    }
+                    else {
+                        silentSessionListRefreshGeneration.set(it)
+                        pendingSilentSessionListRefresh.set(false)
+                    }
+                }
+            }
+        } ?: return
         val credentialGeneration = requestCredentialGeneration
         mutableState.update { current ->
             if (
+                showLoading &&
                 current.backend?.id == backend.id &&
                 backendCredentialGeneration.get() == credentialGeneration
             ) {
-                current.copy(loading = true)
+                current.copy(sessionListLoading = true, sessionListError = null)
             } else {
                 current
             }
         }
-        runCatching { restClient.sessions(backend, token).sessions }
-            .onSuccess { sessions ->
+        try {
+            runCatching { restClient.sessions(backend, token).sessions }
+                .onSuccess { sessions ->
                 sessionTargetMutex.withLock {
                     var published = false
                     mutableState.update { current ->
                         published = false
                         val ownsLoading = current.backend?.id == backend.id &&
                             sessionListRefreshGeneration.get() == refreshGeneration &&
-                            openSessionGeneration.get() == requestOpenSessionGeneration &&
                             backendCredentialGeneration.get() == credentialGeneration
                         if (!ownsLoading) {
                             current
                         } else if (sessionListGeneration.get() != requestGeneration) {
-                            current.copy(loading = false)
+                            pendingSilentSessionListRefresh.set(true)
+                            if (showLoading) current.copy(sessionListLoading = false) else current
                         } else {
                             published = true
-                            current.copy(sessions = sessions, loading = false, error = null)
+                            current.copy(
+                                sessions = sessions,
+                                sessionListLoading = if (showLoading) false else current.sessionListLoading,
+                                sessionListError = null,
+                            )
                         }
                     }
                     if (published) {
@@ -606,30 +774,62 @@ class HermesRepository @Inject constructor(
                 }
             }
             .onFailure { error ->
+                if (error is CancellationException || !currentCoroutineContext().isActive) {
+                    throw CancellationException("Session refresh cancelled").also { it.initCause(error) }
+                }
                 var currentRequest = false
                 mutableState.update { current ->
                     val ownsLoading = current.backend?.id == backend.id &&
                         sessionListRefreshGeneration.get() == refreshGeneration &&
-                        openSessionGeneration.get() == requestOpenSessionGeneration &&
                         backendCredentialGeneration.get() == credentialGeneration
                     if (!ownsLoading) {
                         current
                     } else {
                         currentRequest = sessionListGeneration.get() == requestGeneration
-                        current.copy(loading = false)
+                        if (!currentRequest) pendingSilentSessionListRefresh.set(true)
+                        if (showLoading) current.copy(sessionListLoading = false) else current
                     }
                 }
                 if (
+                    error.isSessionAuthenticationFailure() &&
+                    mutableState.value.backend?.id == backend.id &&
+                    sessionListRefreshGeneration.get() == refreshGeneration &&
+                    backendCredentialGeneration.get() == credentialGeneration
+                ) {
+                    failSessionListRefresh(error)
+                } else if (
                     currentRequest &&
                     mutableState.value.backend?.id == backend.id &&
                     sessionListRefreshGeneration.get() == refreshGeneration &&
-                    openSessionGeneration.get() == requestOpenSessionGeneration &&
                     backendCredentialGeneration.get() == credentialGeneration &&
                     sessionListGeneration.get() == requestGeneration
                 ) {
-                    fail(error)
+                    if (showLoading) failSessionListRefresh(error)
                 }
             }
+        } finally {
+            if (showLoading && visibleSessionListRefreshGeneration.compareAndSet(refreshGeneration, 0L)) {
+                mutableState.update { current ->
+                    if (
+                        current.backend?.id == backend.id &&
+                        current.sessionListLoading &&
+                        backendCredentialGeneration.get() == credentialGeneration &&
+                        sessionListRefreshGeneration.get() == refreshGeneration
+                    ) {
+                        current.copy(sessionListLoading = false)
+                    } else {
+                        current
+                    }
+                }
+                if (pendingSilentSessionListRefresh.getAndSet(false)) {
+                    scope.launch { refreshSessions(showLoading = false) }
+                }
+            } else if (!showLoading && silentSessionListRefreshGeneration.compareAndSet(refreshGeneration, 0L)) {
+                if (pendingSilentSessionListRefresh.getAndSet(false)) {
+                    scope.launch { refreshSessions(showLoading = false) }
+                }
+            }
+        }
     }
 
     fun searchSessions(query: String) {
@@ -939,7 +1139,12 @@ class HermesRepository @Inject constructor(
         }
     }
 
-    suspend fun newSession(profile: String? = null, preservePendingAttachments: Boolean = false): Boolean {
+    suspend fun newSession(
+        profile: String? = null,
+        preservePendingAttachments: Boolean = false,
+        title: String? = null,
+        hidden: Boolean = false,
+    ): Boolean {
         if (!preservePendingAttachments) invalidatePendingAttachments()
         val requestGeneration = openSessionGeneration.incrementAndGet()
         val backend = try {
@@ -959,6 +1164,8 @@ class HermesRepository @Inject constructor(
                     put("cols", 96)
                     put("source", "android")
                     profile?.let { put("profile", it) }
+                    title?.takeIf(String::isNotBlank)?.let { put("title", it) }
+                    if (hidden) put("hidden", true)
                 },
             ).let { json.decodeFromJsonElement(SessionCreateResult.serializer(), it) }
         } catch (cancelled: CancellationException) {
@@ -992,7 +1199,7 @@ class HermesRepository @Inject constructor(
         val activeProfile = profile ?: current.activeProfile
         val durableId = created.durableSessionId.orEmpty().ifBlank { created.info.storedSessionId }
         val activeSession = durableId.takeIf(String::isNotBlank)?.let {
-            StoredSession(sessionId = it, profile = activeProfile, source = "android")
+            StoredSession(sessionId = it, profile = activeProfile, source = "android", title = title)
         }
         mutableState.value = current.copy(
             activeStoredSession = activeSession,
@@ -1019,6 +1226,210 @@ class HermesRepository @Inject constructor(
         loadComposerState()
         refreshModelOptions()
         return true
+    }
+
+    suspend fun openCanonicalBotChat(profileName: String): Boolean {
+        val profile = profileName.trim()
+        require(profile.isNotEmpty()) { "Hermes profile is required" }
+        val backendId = mutableState.value.backend?.id ?: return false
+        val credentialGeneration = backendCredentialGeneration.get()
+        return canonicalChatMutexes.getOrPut(BotProfileKey(backendId, profile.normalizedProfile())) { Mutex() }.withLock {
+            if (
+                mutableState.value.backend?.id != backendId ||
+                backendCredentialGeneration.get() != credentialGeneration
+            ) return@withLock false
+            if (
+                mutableState.value.isActiveCanonicalBotChat() &&
+                mutableState.value.activeStoredSession?.profile.normalizedProfile() == profile.normalizedProfile()
+            ) return@withLock true
+
+            val registered = mutableState.value.profiles.firstOrNull {
+                it.name.normalizedProfile() == profile.normalizedProfile()
+            }?.let { it.canonicalSession ?: it.preferredSession }
+
+            val existing = try {
+                gateway.request(
+                    "session.list",
+                    buildJsonObject {
+                        put("profile", profile)
+                        put("title", BOT_CHAT_TITLE)
+                        put("limit", 200)
+                        put("include_hidden", true)
+                    },
+                ).let { json.decodeFromJsonElement(BotSessionPage.serializer(), it) }
+                    .sessions.firstOrNull(BotSessionSummary::isCanonicalBotChat)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                if (
+                    registered != null &&
+                    mutableState.value.backend?.id == backendId &&
+                    backendCredentialGeneration.get() == credentialGeneration
+                ) {
+                    openSession(registered.toStoredSession(profile))
+                    return@withLock mutableState.value.runtimeSessionId != null &&
+                        mutableState.value.backend?.id == backendId &&
+                        mutableState.value.activeStoredSession?.profile.normalizedProfile() == profile.normalizedProfile()
+                }
+                if (
+                    mutableState.value.backend?.id == backendId &&
+                    backendCredentialGeneration.get() == credentialGeneration
+                ) fail(error)
+                return@withLock false
+            }
+            if (
+                mutableState.value.backend?.id != backendId ||
+                backendCredentialGeneration.get() != credentialGeneration
+            ) return@withLock false
+
+            val canonical = existing ?: registered
+            if (canonical != null) {
+                openSession(canonical.toStoredSession(profile))
+                return@withLock mutableState.value.runtimeSessionId != null &&
+                    mutableState.value.backend?.id == backendId &&
+                    mutableState.value.activeStoredSession?.profile.normalizedProfile() == profile.normalizedProfile()
+            }
+
+            if (!newSession(profile, title = BOT_CHAT_TITLE, hidden = true)) return@withLock false
+            if (
+                mutableState.value.backend?.id != backendId ||
+                backendCredentialGeneration.get() != credentialGeneration
+            ) return@withLock false
+            val runtimeId = mutableState.value.runtimeSessionId ?: return@withLock false
+            try {
+                gateway.request(
+                    "session.title",
+                    buildJsonObject {
+                        put("session_id", runtimeId)
+                        put("title", BOT_CHAT_TITLE)
+                    },
+                )
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Throwable) {
+                // Older gateways persist the title with the first prompt.
+            }
+            if (
+                mutableState.value.backend?.id != backendId ||
+                backendCredentialGeneration.get() != credentialGeneration ||
+                mutableState.value.runtimeSessionId != runtimeId
+            ) return@withLock false
+            send(BOT_CHAT_INTRO)
+            mutableState.value.error == null
+        }
+    }
+
+    suspend fun botDirectChat(
+        backendId: String,
+        profileName: String,
+        prompt: String? = null,
+    ): BotDirectChat {
+        val profile = profileName.trim()
+        val message = prompt?.trim()
+        require(profile.isNotEmpty()) { "Hermes profile is required" }
+        require(prompt == null || !message.isNullOrEmpty()) { "Message is required" }
+        return withBotGateway(backendId) { client, _ ->
+            val existing = client.request(
+                "session.list",
+                buildJsonObject {
+                    put("profile", profile)
+                    put("title", BOT_CHAT_TITLE)
+                    put("limit", 200)
+                    put("include_hidden", true)
+                },
+            ).let { json.decodeFromJsonElement(BotSessionPage.serializer(), it) }
+                .sessions.firstOrNull(BotSessionSummary::isCanonicalBotChat)
+            val created = if (existing == null) {
+                client.request(
+                    "session.create",
+                    buildJsonObject {
+                        put("profile", profile)
+                        put("title", BOT_CHAT_TITLE)
+                        put("hidden", true)
+                    },
+                ).let { json.decodeFromJsonElement(SessionCreateResult.serializer(), it) }
+            } else {
+                null
+            }
+            val durableId = existing?.let { it.resolvedId ?: it.id }
+                ?: created?.durableSessionId
+                ?: created?.runtimeSessionId
+                ?: error("Hermes did not return the Bot Chat")
+            var resumed = if (created == null) {
+                client.request(
+                    "session.resume",
+                    buildJsonObject { put("session_id", durableId); put("profile", profile) },
+                ).let { json.decodeFromJsonElement(SessionResumeResult.serializer(), it) }
+            } else {
+                SessionResumeResult(
+                    runtimeSessionId = created.runtimeSessionId,
+                    durableSessionId = created.durableSessionId,
+                    messages = created.messages,
+                    running = created.running,
+                )
+            }
+            suspend fun waitUntilIdle(before: Int, requireNewMessage: Boolean): SessionResumeResult {
+                val deadline = System.currentTimeMillis() + 180_000
+                while (
+                    resumed.running || resumed.inflight != null ||
+                    (requireNewMessage && resumed.messages.size <= before)
+                ) {
+                    if (System.currentTimeMillis() >= deadline) {
+                        throw IllegalStateException("${profile.replaceFirstChar(Char::uppercase)} is still working; try again shortly")
+                    }
+                    delay(1_000)
+                    resumed = client.request(
+                        "session.resume",
+                        buildJsonObject { put("session_id", durableId); put("profile", profile) },
+                    ).let { json.decodeFromJsonElement(SessionResumeResult.serializer(), it) }
+                }
+                return resumed
+            }
+            if (created != null) {
+                try {
+                    client.request(
+                        "session.title",
+                        buildJsonObject {
+                            put("session_id", created.runtimeSessionId)
+                            put("title", BOT_CHAT_TITLE)
+                        },
+                    )
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (error: HermesRpcException) {
+                    if (error.rpcCode != -32601) throw error
+                }
+                client.request(
+                    "prompt.submit",
+                    buildJsonObject { put("session_id", created.runtimeSessionId); put("text", BOT_CHAT_INTRO) },
+                )
+            } else if (message != null) {
+                resumed = waitUntilIdle(resumed.messages.size, requireNewMessage = false)
+            }
+            if (message != null) {
+                val before = resumed.messages.size
+                client.request(
+                    "prompt.submit",
+                    buildJsonObject { put("session_id", resumed.runtimeSessionId); put("text", message) },
+                )
+                resumed = waitUntilIdle(before, requireNewMessage = true)
+            }
+            BotDirectChat(
+                resumed.messages.mapIndexedNotNull { index, entry ->
+                    entry.botGroupText().takeIf(String::isNotBlank)?.let { text ->
+                        BotDirectMessage(entry.id ?: "$durableId:$index", entry.role, text)
+                    }
+                }.filter { it.role == "user" || it.role == "assistant" }.takeLast(40),
+            )
+        }
+    }
+
+    suspend fun resetActive() {
+        if (mutableState.value.isActiveCanonicalBotChat()) {
+            compressActive()
+        } else {
+            newSession(mutableState.value.activeStoredSession?.profile)
+        }
     }
 
     fun updateDraft(value: String) {
@@ -1216,7 +1627,11 @@ class HermesRepository @Inject constructor(
         when (name) {
             "new", "reset" -> {
                 clearCurrentDraft()
-                newSession(mutableState.value.activeStoredSession?.profile)
+                if (mutableState.value.isActiveCanonicalBotChat()) {
+                    compressActive()
+                } else {
+                    newSession(mutableState.value.activeStoredSession?.profile)
+                }
             }
             "retry" -> {
                 clearCurrentDraft()
@@ -1414,6 +1829,8 @@ class HermesRepository @Inject constructor(
             newSession()
             requireNotNull(mutableState.value.runtimeSessionId)
         }
+        val senderBackendId = mutableState.value.backend?.id.orEmpty()
+        val senderProfile = mutableState.value.activeStoredSession?.profile ?: mutableState.value.activeProfile
         val attachmentRefs = mutableState.value.pendingAttachments.mapNotNull { it.refText }
         val submittedText = buildString {
             append(cleaned)
@@ -1438,7 +1855,99 @@ class HermesRepository @Inject constructor(
             if (mutableState.value.draft == submittedDraft) {
                 clearDraft(listOfNotNull(draftContextBeforeSend, currentDraftContext()).distinct())
             }
+            if (Regex("(^|\\s)@[a-z0-9]", RegexOption.IGNORE_CASE).containsMatchIn(cleaned)) {
+                scope.launch { dispatchBotMentions(cleaned, senderProfile, senderBackendId) }
+            }
         }.onFailure(::fail)
+    }
+
+    private suspend fun dispatchBotMentions(text: String, senderProfile: String, senderBackendId: String) {
+        val result = try {
+            botGroupCandidates()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Throwable) {
+            mutableState.update { it.copy(error = "Message sent, but Bot mentions could not be resolved: ${DiagnosticRedactor.redact(error.message.orEmpty())}") }
+            return
+        }
+        val candidates = result.candidates.map { BotMention(it.profile.name, it.backendId, it.handle) }
+        val senderHandle = candidates.firstOrNull {
+            it.backendId == senderBackendId && it.profile.equals(senderProfile, ignoreCase = true)
+        }?.handle ?: senderProfile
+        val mentions = resolveBotMentions(
+            text,
+            candidates,
+            senderProfile,
+            senderBackendId,
+        )
+        val failures = mentions.mapNotNull { target ->
+            try {
+                deliverBotMention(target, senderProfile, senderHandle, text)
+                null
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Throwable) {
+                "@${target.handle}"
+            }
+        }
+        if (failures.isNotEmpty()) {
+            mutableState.update { it.copy(error = "Message sent here, but ${failures.joinToString()} could not be reached.") }
+        }
+    }
+
+    private suspend fun deliverBotMention(target: BotMention, senderProfile: String, senderHandle: String, text: String) {
+        withBotGateway(target.backendId) { client, _ ->
+            val existing = client.request(
+                "session.list",
+                buildJsonObject {
+                    put("profile", target.profile)
+                    put("title", BOT_CHAT_TITLE)
+                    put("include_hidden", true)
+                    put("limit", 200)
+                },
+            ).let { json.decodeFromJsonElement(BotSessionPage.serializer(), it) }
+                .sessions.firstOrNull(BotSessionSummary::isCanonicalBotChat)
+            val runtime = if (existing != null) {
+                client.request(
+                    "session.resume",
+                    buildJsonObject {
+                        put("session_id", existing.resolvedId ?: existing.id)
+                        put("profile", target.profile)
+                    },
+                ).let { json.decodeFromJsonElement(SessionResumeResult.serializer(), it) }.runtimeSessionId
+            } else {
+                val created = client.request(
+                    "session.create",
+                    buildJsonObject {
+                        put("profile", target.profile)
+                        put("title", BOT_CHAT_TITLE)
+                        put("hidden", true)
+                    },
+                ).let { json.decodeFromJsonElement(SessionCreateResult.serializer(), it) }
+                created.runtimeSessionId.also { runtimeId ->
+                    try {
+                        client.request(
+                            "session.title",
+                            buildJsonObject {
+                                put("session_id", runtimeId)
+                                put("title", BOT_CHAT_TITLE)
+                            },
+                        )
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (error: HermesRpcException) {
+                        if (error.rpcCode != -32601) throw error
+                    }
+                }
+            }
+            client.request(
+                "prompt.submit",
+                buildJsonObject {
+                    put("session_id", runtime)
+                    put("text", "Message from 🤖 $senderProfile (@$senderHandle): $text")
+                },
+            )
+        }
     }
 
     suspend fun steer(text: String) {
@@ -1478,6 +1987,8 @@ class HermesRepository @Inject constructor(
     suspend fun renameActive(title: String) {
         val cleaned = title.trim()
         require(cleaned.isNotEmpty() && cleaned.length <= 200) { "Session titles must be 1–200 characters" }
+        val requestBackendId = mutableState.value.backend?.id
+        val credentialGeneration = backendCredentialGeneration.get()
         val sessionId = mutableState.value.runtimeSessionId ?: return
         runCatching {
             val response = gateway.request(
@@ -1489,6 +2000,7 @@ class HermesRepository @Inject constructor(
             )
             json.decodeFromJsonElement(SessionTitleResult.serializer(), response)
         }.onSuccess { result ->
+            requestBackendId?.let { markSessionListMutation(it, credentialGeneration) }
             val active = mutableState.value.activeStoredSession
             val durableId = result.sessionKey ?: active?.durableId
             mutableState.value = mutableState.value.copy(
@@ -1905,19 +2417,32 @@ class HermesRepository @Inject constructor(
     }
 
     suspend fun refreshCronJobs() {
+        refreshCronJobs(null)
+    }
+
+    suspend fun refreshBotRoutines(owner: String) {
+        refreshCronJobs(owner)
+    }
+
+    private suspend fun refreshCronJobs(profile: String?) {
         val (backend, token) = activeCredentials()
         mutableState.value = mutableState.value.copy(managementLoading = true, error = null)
-        runCatching { restClient.cronJobs(backend, token) }
+        runCatching { restClient.cronJobs(backend, token, profile) }
             .onSuccess { jobs ->
-                mutableState.value = mutableState.value.copy(cronJobs = jobs, managementLoading = false)
+                val merged = if (profile == null) jobs else {
+                    mutableState.value.cronJobs.filterNot { it.botRoutineOwner() == profile.lowercase() } +
+                        jobs.filter { it.botRoutineOwner() == profile.lowercase() }
+                }
+                mutableState.value = mutableState.value.copy(cronJobs = merged, managementLoading = false)
             }
             .onFailure(::fail)
     }
 
     suspend fun refreshCronRuns(jobId: String) {
         val (backend, token) = activeCredentials()
+        val profile = botRoutineProfile(jobId)
         mutableState.value = mutableState.value.copy(managementLoading = true, error = null)
-        runCatching { restClient.cronRuns(backend, token, jobId).runs }
+        runCatching { restClient.cronRuns(backend, token, jobId, profile = profile).runs }
             .onSuccess { runs ->
                 mutableState.value = mutableState.value.copy(
                     cronRuns = mutableState.value.cronRuns + (jobId to runs),
@@ -1930,19 +2455,30 @@ class HermesRepository @Inject constructor(
 
     suspend fun setCronEnabled(jobId: String, enabled: Boolean) {
         val (backend, token) = activeCredentials()
-        runCatching { restClient.setCronEnabled(backend, token, jobId, enabled) }
+        runCatching { restClient.setCronEnabled(backend, token, jobId, enabled, botRoutineProfile(jobId)) }
             .onSuccess(::replaceCronJob)
             .onFailure(::fail)
     }
 
     suspend fun triggerCron(jobId: String) {
         val (backend, token) = activeCredentials()
-        runCatching { restClient.triggerCron(backend, token, jobId) }
+        runCatching { restClient.triggerCron(backend, token, jobId, botRoutineProfile(jobId)) }
             .onSuccess(::replaceCronJob)
             .onFailure(::fail)
     }
 
     suspend fun createCron(name: String, prompt: String, schedule: String, deliver: String) {
+        createCronForProfile(null, name, prompt, schedule, deliver)
+    }
+
+    suspend fun createBotRoutine(owner: String, name: String, prompt: String, schedule: String, deliver: String) {
+        require(name.let { BOT_ROUTINE_NAME.matches(it) } && name.startsWith("[bot:${owner.lowercase()}]", ignoreCase = true)) {
+            "Bot routine name must match its owner"
+        }
+        createCronForProfile(owner, name, prompt, schedule, deliver)
+    }
+
+    private suspend fun createCronForProfile(profile: String?, name: String, prompt: String, schedule: String, deliver: String) {
         val cleanPrompt = prompt.trim()
         val cleanSchedule = schedule.trim()
         require(cleanPrompt.isNotEmpty() && cleanSchedule.isNotEmpty()) { "Cron prompt and schedule are required" }
@@ -1957,6 +2493,7 @@ class HermesRepository @Inject constructor(
                     schedule = cleanSchedule,
                     deliver = deliver.trim().takeIf(String::isNotEmpty),
                 ),
+                profile,
             )
         }.onSuccess(::replaceCronJob).onFailure(::fail)
     }
@@ -1966,6 +2503,10 @@ class HermesRepository @Inject constructor(
         val cleanSchedule = schedule.trim()
         require(cleanPrompt.isNotEmpty() && cleanSchedule.isNotEmpty()) { "Cron prompt and schedule are required" }
         val (backend, token) = activeCredentials()
+        val owner = botRoutineProfile(jobId)
+        if (owner != null) require(name.startsWith("[bot:$owner]", ignoreCase = true) && BOT_ROUTINE_NAME.matches(name)) {
+            "Bot routine name must match its owner"
+        }
         runCatching {
             restClient.updateCron(
                 backend,
@@ -1977,13 +2518,14 @@ class HermesRepository @Inject constructor(
                     schedule = cleanSchedule,
                     deliver = deliver.trim(),
                 ),
+                owner,
             )
         }.onSuccess(::replaceCronJob).onFailure(::fail)
     }
 
     suspend fun deleteCron(jobId: String) {
         val (backend, token) = activeCredentials()
-        runCatching { restClient.deleteCron(backend, token, jobId) }
+        runCatching { restClient.deleteCron(backend, token, jobId, botRoutineProfile(jobId)) }
             .onSuccess {
                 mutableState.value = mutableState.value.copy(
                     cronJobs = mutableState.value.cronJobs.filterNot { it.id == jobId },
@@ -1994,21 +2536,1155 @@ class HermesRepository @Inject constructor(
             .onFailure(::fail)
     }
 
-    suspend fun refreshProfiles() {
+    private fun botRoutineProfile(jobId: String): String? =
+        mutableState.value.cronJobs.firstOrNull { it.id == jobId }?.botRoutineOwner()
+
+    suspend fun refreshProfiles(showLoading: Boolean = true) {
         val (backend, token) = activeCredentials()
-        mutableState.value = mutableState.value.copy(managementLoading = true, error = null)
+        val credentialGeneration = backendCredentialGeneration.get()
+        val refreshGeneration = profileRefreshGeneration.incrementAndGet()
+        val groupGeneration = botGroupMutationGeneration.get()
+        if (showLoading) mutableState.value = mutableState.value.copy(managementLoading = true, error = null)
         val result = runCatching {
-            restClient.profiles(backend, token) to restClient.activeProfile(backend, token)
+            val profiles = runCatching {
+                gateway.request(
+                    "profiles.list",
+                    buildJsonObject { put("include_sessions", true) },
+                )
+                    .let { json.decodeFromJsonElement(ProfilesResponse.serializer(), it) }
+            }.getOrElse { restClient.profiles(backend, token) }
+            profiles to restClient.activeProfile(backend, token)
         }
         result.onSuccess { (profiles, active) ->
+            if (
+                mutableState.value.backend?.id != backend.id ||
+                backendCredentialGeneration.get() != credentialGeneration ||
+                profileRefreshGeneration.get() != refreshGeneration
+            ) return@onSuccess
+            val priorGroups = mutableState.value.botGroups
+            val defaultProfile = profiles.profiles.firstOrNull { it.name == "default" }
+            val activeSnapshot = runCatching {
+                check(defaultProfile != null || priorGroups.rooms.isEmpty()) {
+                    "Hermes default profile is unavailable"
+                }
+                profileGroupSnapshot(defaultProfile, json)
+            }
+            val groupError = activeSnapshot.exceptionOrNull()?.let {
+                "Hermes returned malformed Bot group metadata; existing rooms were kept."
+            }
+            val groupRefreshOwned = botGroupMutationGeneration.get() == groupGeneration
             mutableState.value = mutableState.value.copy(
                 profiles = profiles.profiles.sortedWith(compareByDescending<ProfileInfo> { it.isDefault }.thenBy { it.name }),
+                botGroups = if (groupRefreshOwned) {
+                    priorGroups.copy(
+                        rooms = activeSnapshot.getOrNull()?.visibleRooms() ?: priorGroups.rooms,
+                        loading = false,
+                        error = groupError,
+                    )
+                } else {
+                    priorGroups.copy(loading = false)
+                },
                 activeProfile = active.active,
                 currentProfile = active.current,
-                managementLoading = false,
+                managementLoading = if (showLoading) false else mutableState.value.managementLoading,
                 error = null,
             )
+            if (activeSnapshot.isSuccess && groupRefreshOwned) {
+                val synchronized = runCatching {
+                    mutateBotGroups { snapshot ->
+                        check(botGroupMutationGeneration.get() == groupGeneration) {
+                            "Bot group refresh was superseded"
+                        }
+                        pendingBotGroupSnapshot?.let { mergeBotGroupSnapshots(snapshot, it) } ?: snapshot
+                    }
+                }
+                if (synchronized.isSuccess) {
+                    mutableState.value.botGroups.rooms.forEach { room ->
+                        scope.launch { rehydrateBotGroupBlocking(room.roomId) }
+                    }
+                } else if (botGroupMutationGeneration.get() == groupGeneration) {
+                    mutableState.value = mutableState.value.copy(
+                        botGroups = mutableState.value.botGroups.copy(
+                            error = synchronized.exceptionOrNull()?.message ?: "Bot group sync could not complete; refresh to retry.",
+                        ),
+                    )
+                }
+            }
+        }.onFailure { error ->
+            if (
+                mutableState.value.backend?.id == backend.id &&
+                backendCredentialGeneration.get() == credentialGeneration &&
+                profileRefreshGeneration.get() == refreshGeneration
+            ) fail(error)
+        }
+    }
+
+    suspend fun setBotHidden(
+        profileName: String,
+        hidden: Boolean,
+        backendId: String = mutableState.value.backend?.id.orEmpty(),
+    ) {
+        val profile = if (backendId == mutableState.value.backend?.id) {
+            mutableState.value.profiles.firstOrNull { it.name == profileName }
+        } else {
+            mutableState.value.botCandidates.firstOrNull {
+                it.backendId == backendId && it.profile.name == profileName
+            }?.profile
+        }
+            ?: throw IllegalArgumentException("Unknown Hermes profile")
+        runCatching {
+            val response = withBotGateway(backendId) { client, _ ->
+                client.request("profiles.configure", botHiddenConfigureParams(profile, hidden))
+            }
+            require(
+                response.jsonObject["applied"]?.jsonObject?.get("ui_meta")?.jsonPrimitive?.booleanOrNull == true,
+            ) { "Hermes did not save the Bot visibility change; refresh and try again" }
+            if (backendId == mutableState.value.backend?.id) refreshProfiles()
+            botGroupCandidates()
         }.onFailure(::fail)
+    }
+
+    suspend fun createBotGroup(name: String, members: List<BotGroupMember>): BotGroupRoom {
+        require(members.none(::isOfflineBotGroupMember)) { "Reconnect offline Bot sources before adding their agents" }
+        val created = newBotGroupRoom(name, members, System.currentTimeMillis())
+        mutateBotGroups { snapshot ->
+            val taken = snapshot.visibleRooms().mapTo(mutableSetOf()) { it.name.lowercase() }
+            if (snapshot.rooms["id:${created.roomId}"] != null) return@mutateBotGroups snapshot
+            require(name.trim().lowercase() !in taken) { "A group with that name already exists" }
+            snapshot.upsert(created, System.currentTimeMillis())
+        }
+        syncBotGroupMemberships(null, created)
+        return created
+    }
+
+    suspend fun botGroupCandidates(): BotGroupCandidateResult {
+        val refreshGeneration = botRosterRefreshGeneration.incrementAndGet()
+        val backends = mutableState.value.savedBackends
+        val credentialGenerations = backends.associate { backend ->
+            backend.id to botRosterCredentialGenerations.getOrPut(backend.id) { AtomicLong() }.get()
+        }
+        val profilesByBackend = linkedMapOf<String, List<ProfileInfo>>()
+        val unavailable = mutableListOf<String>()
+        val unavailableIds = mutableSetOf<String>()
+        for (backend in backends) {
+            try {
+                withBotGateway(backend.id) { client, source ->
+                    profilesByBackend[source.id] = client.request(
+                        "profiles.list",
+                        buildJsonObject { put("include_sessions", true) },
+                    )
+                        .let { json.decodeFromJsonElement(ProfilesResponse.serializer(), it) }
+                        .profiles
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Throwable) {
+                unavailable += backend.label
+                unavailableIds += backend.id
+                botRosterCache[backend.id]?.let { profilesByBackend[backend.id] = it }
+            }
+        }
+        return botRosterMutex.withLock {
+            if (
+                botRosterRefreshGeneration.get() != refreshGeneration ||
+                mutableState.value.savedBackends.map(BackendConfig::id) != backends.map(BackendConfig::id) ||
+                credentialGenerations.any { (id, generation) ->
+                    botRosterCredentialGenerations[id]?.get() != generation
+                }
+            ) {
+                val current = mutableState.value.botCandidates
+                return@withLock BotGroupCandidateResult(
+                    current,
+                    current.filter(BotGroupCandidate::offline).map { it.backendLabel }.distinct(),
+                )
+            }
+            backends.filterNot { it.id in unavailableIds }.forEach { backend ->
+                profilesByBackend[backend.id]?.let { botRosterCache[backend.id] = it }
+            }
+            val sources = backends.flatMap { backend ->
+                profilesByBackend[backend.id].orEmpty().map { profile -> backend to profile }
+            }
+            val baseNames = sources.map { botMentionBaseHandle(it.second) }
+            val repeatedNames = baseNames.groupingBy(String::lowercase).eachCount()
+            val baseHandles = sources.map { (backend, profile) ->
+                val baseName = botMentionBaseHandle(profile)
+                if (repeatedNames[baseName.lowercase()] == 1) baseName else "$baseName-${backend.id.take(8).lowercase()}"
+            }
+            val usedHandles = mutableSetOf<String>()
+            val candidates = sources.indices.sortedWith(
+                compareBy<Int> { sources[it].first.id }.thenBy { sources[it].second.name.lowercase() },
+            ).map { index ->
+                val (backend, profile) = sources[index]
+                val base = baseHandles[index].take(128)
+                var handle = base
+                var suffix = 2
+                while (!usedHandles.add(handle.lowercase())) {
+                    val ending = "-${suffix++}"
+                    handle = base.take(128 - ending.length).trimEnd('-') + ending
+                }
+                BotGroupCandidate(profile, backend.id, backend.label, handle, backend.id in unavailableIds)
+            }.sortedWith(compareBy<BotGroupCandidate> { it.profile.name.lowercase() }.thenBy { it.backendLabel.lowercase() })
+            mutableState.value = mutableState.value.copy(botCandidates = candidates)
+            BotGroupCandidateResult(candidates, unavailable.distinct())
+        }
+    }
+
+    private suspend fun invalidateBotRoster(backendId: String) {
+        botRosterMutex.withLock {
+            botRosterCredentialGenerations.getOrPut(backendId) { AtomicLong() }.incrementAndGet()
+            botRosterCache.remove(backendId)
+            mutableState.value = mutableState.value.copy(
+                botCandidates = mutableState.value.botCandidates.filterNot { it.backendId == backendId },
+            )
+        }
+    }
+
+    suspend fun updateBotGroup(room: BotGroupRoom): BotGroupRoom {
+        require(room.roomId.isNotBlank()) { "Group identity is required" }
+        val prior = mutableState.value.botGroups.rooms.firstOrNull { it.roomId == room.roomId }
+            ?: throw IllegalArgumentException("Unknown Bot group")
+        val priorMembers = prior.members.mapTo(mutableSetOf(), ::botGroupMemberKey)
+        require(room.members.none { botGroupMemberKey(it) !in priorMembers && isOfflineBotGroupMember(it) }) {
+            "Reconnect offline Bot sources before adding their agents"
+        }
+        var saved = room
+        mutateBotGroups { snapshot ->
+            val current = snapshot.visibleRooms().firstOrNull { it.roomId == room.roomId }
+            if (current == null && "id:${room.roomId}" in snapshot.deleted) {
+                throw IllegalStateException("That Bot group was disbanded")
+            }
+            val mergedLog = (current?.log.orEmpty() + room.log).distinctBy { it.id }.sortedBy { it.at }
+            saved = room.copy(
+                log = mergedLog,
+                revision = maxOf(room.revision, current?.revision ?: 0) + 1,
+            )
+            snapshot.upsert(saved, System.currentTimeMillis())
+        }
+        if (
+            prior.name != saved.name ||
+            prior.members.map(::botGroupMemberKey).toSet() != saved.members.map(::botGroupMemberKey).toSet()
+        ) {
+            syncBotGroupMemberships(prior, saved)
+        }
+        return saved
+    }
+
+    private fun isOfflineBotGroupMember(member: BotGroupMember): Boolean =
+        mutableState.value.botCandidates.any {
+            it.offline && it.backendId == member.connectionId && it.profile.name == member.name
+        }
+
+    suspend fun disbandBotGroup(roomId: String) {
+        botGroupRuns.getOrPut(roomId, ::AtomicLong).incrementAndGet()
+        val removed = mutableState.value.botGroups.rooms.firstOrNull { it.roomId == roomId }
+            ?: throw IllegalArgumentException("Unknown Bot group")
+        val interruptionFailures = interruptBotGroupSessions(removed)
+        mutateBotGroups { snapshot ->
+            val room = snapshot.visibleRooms().firstOrNull { it.roomId == roomId }
+                ?: return@mutateBotGroups snapshot.takeIf { "id:$roomId" in it.deleted }
+                    ?: throw IllegalArgumentException("Unknown Bot group")
+            snapshot.disband(room, room.revision + 1, System.currentTimeMillis())
+        }
+        val groups = mutableState.value.botGroups
+        mutableState.value = mutableState.value.copy(
+            botGroups = groups.copy(
+                blockingRequests = groups.blockingRequests.filterNot { it.roomId == roomId },
+                needsYouRoomIds = groups.needsYouRoomIds - roomId,
+            ),
+        )
+        syncBotGroupMemberships(removed, null)
+        if (interruptionFailures.isNotEmpty()) {
+            mutableState.value = mutableState.value.copy(
+                botGroups = mutableState.value.botGroups.copy(
+                    error = "The group was removed, but ${interruptionFailures.joinToString()} could not be interrupted.",
+                ),
+            )
+        }
+    }
+
+    private suspend fun syncBotGroupMemberships(old: BotGroupRoom?, current: BotGroupRoom?) {
+        val members = (old?.members.orEmpty() + current?.members.orEmpty()).distinctBy(::botGroupMemberKey)
+        val failures = mutableListOf<String>()
+        for (member in members) {
+            try {
+                val retained = current?.members?.any { botGroupMemberKey(it) == botGroupMemberKey(member) } == true
+                configureBotGroupMembership(member, old?.name, current?.name?.takeIf { retained })
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Throwable) {
+                failures += member.handle.ifBlank { member.name }
+            }
+        }
+        if (failures.isNotEmpty()) {
+            mutableState.value = mutableState.value.copy(
+                botGroups = mutableState.value.botGroups.copy(
+                    error = "The room was saved, but membership labels could not sync for ${failures.joinToString()}.",
+                ),
+            )
+        }
+    }
+
+    private suspend fun configureBotGroupMembership(member: BotGroupMember, remove: String?, add: String?) {
+        withBotGateway(member.connectionId.ifBlank { requireNotNull(mutableState.value.backend).id }) { client, _ ->
+            repeat(3) { attempt ->
+                val profiles = client.request("profiles.list", buildJsonObject { put("include_sessions", false) })
+                    .let { json.decodeFromJsonElement(ProfilesResponse.serializer(), it) }
+                val profile = profiles.profiles.firstOrNull { it.name == member.name }
+                    ?: throw IllegalArgumentException("Unknown group member ${member.name}")
+                val groups = profile.botMemberships().filterNot { it == remove }
+                    .let { existing -> add?.let { (existing + it).distinct() } ?: existing }
+                val existingMeta = profile.uiMeta?.get("hermes-bots")?.jsonObject.orEmpty()
+                val response = client.request(
+                    "profiles.configure",
+                    buildJsonObject {
+                        put("name", member.name)
+                        put("ui_meta", buildJsonObject {
+                            put("hermes-bots", buildJsonObject {
+                                existingMeta.forEach(::put)
+                                put("groups", JsonArray(groups.map(::JsonPrimitive)))
+                                groups.firstOrNull()?.let { put("group", it) } ?: put("group", kotlinx.serialization.json.JsonNull)
+                            })
+                        })
+                        put("ui_meta_expected_revisions", buildJsonObject {
+                            put("hermes-bots", profile.uiMetaRevisions["hermes-bots"] ?: 0L)
+                        })
+                    },
+                )
+                if (response.jsonObject["applied"]?.jsonObject?.get("ui_meta")?.jsonPrimitive?.booleanOrNull == true) {
+                    return@withBotGateway
+                }
+                if (attempt == 2) throw IllegalStateException("Hermes rejected the group membership update")
+            }
+        }
+    }
+
+
+    suspend fun sendBotGroupMessage(
+        roomId: String,
+        text: String,
+        thread: String = "main",
+        attachments: List<BotGroupAttachment> = emptyList(),
+    ) {
+        val clean = text.trim()
+        require(clean.isNotEmpty()) { "Message is required" }
+        val generation = botGroupRuns.getOrPut(roomId, ::AtomicLong).incrementAndGet()
+        var room = requireNotNull(mutableState.value.botGroups.rooms.firstOrNull { it.roomId == roomId }) {
+            "Unknown Bot group"
+        }
+        room = updateBotGroup(
+            room.copy(log = room.log + BotGroupEntry(
+                id = UUID.randomUUID().toString(),
+                from = BotGroupSpeaker("user", "You"),
+                text = buildString {
+                    append(clean)
+                    attachments.forEach { attachment ->
+                        val kind = when {
+                            attachment.mimeType == "application/pdf" -> "PDF"
+                            attachment.mimeType.startsWith("image/") -> "image"
+                            else -> "file"
+                        }
+                        append("\n[attached $kind: ${attachment.name}]")
+                    }
+                },
+                at = System.currentTimeMillis(),
+                thread = thread,
+            )),
+        )
+        mutableState.value = mutableState.value.copy(
+            botGroups = mutableState.value.botGroups.copy(runningRoomId = roomId),
+        )
+        var posted = 0
+        try {
+            repeat(BOT_GROUP_MAX_ROUNDS) { round ->
+                for (member in room.members) {
+                    if (botGroupRuns[roomId]?.get() != generation) return
+                    room = harvestBotGroupReply(room, member)
+                }
+                var spoke = 0
+                val strandedMembers = room.stranded.keys
+                val responders = groupResponders(
+                    room.log.filter { it.thread == thread }.takeLastWhile { it.from.kind != "user" }.
+                        joinToString("\n", transform = BotGroupEntry::text).ifBlank { clean },
+                    room.members,
+                ).filterNot { botGroupMemberKey(it) in strandedMembers }.let { members ->
+                    if (members.size < 2) members else members.drop(round % members.size) + members.take(round % members.size)
+                }
+                for (member in responders) {
+                    if (botGroupRuns[roomId]?.get() != generation || posted >= BOT_GROUP_MAX_MESSAGES) return
+                    val turn = runCatching {
+                        runBotGroupMemberTurn(room, member, thread, if (round == 0) attachments else emptyList(), generation)
+                    }
+                        .getOrElse { error ->
+                            if (error is CancellationException) throw error
+                            BotGroupTurnResult(notice = "${member.name} could not reply. You can try again.")
+                    }
+                    if (botGroupRuns[roomId]?.get() != generation) return
+                    room = mutableState.value.botGroups.rooms.firstOrNull { it.roomId == roomId } ?: return
+                    turn.notice?.let { notice ->
+                        room = updateBotGroup(room.withBotGroupNotice(notice, thread))
+                    }
+                    turn.strandedBefore?.let { before ->
+                        if (botGroupMemberKey(member) !in room.stranded) {
+                            room = updateBotGroup(
+                                room.copy(stranded = room.stranded + (botGroupMemberKey(member) to BotGroupStranded(before, thread))),
+                            )
+                        }
+                    }
+                    if (turn.completed) {
+                        room = updateBotGroup(room.copy(stranded = room.stranded - botGroupMemberKey(member)))
+                    }
+                    val reply = turn.text
+                    if (!reply.isNullOrBlank() && !isBotGroupPass(reply)) {
+                        room = updateBotGroup(room.copy(log = room.log + BotGroupEntry(
+                            id = turn.messageId ?: UUID.randomUUID().toString(),
+                            from = BotGroupSpeaker(
+                                kind = "member",
+                                name = member.name,
+                                source = member.connectionLabel,
+                            ),
+                            text = reply,
+                            at = System.currentTimeMillis(),
+                            thread = thread,
+                        )))
+                        if (Regex("@user\\b", RegexOption.IGNORE_CASE).containsMatchIn(reply)) {
+                            mutableState.value = mutableState.value.copy(
+                                botGroups = mutableState.value.botGroups.copy(
+                                    needsYouRoomIds = mutableState.value.botGroups.needsYouRoomIds + roomId,
+                                ),
+                            )
+                        }
+                        posted++
+                        spoke++
+                    }
+                }
+                if (spoke == 0) return
+            }
+        } finally {
+            if (botGroupRuns[roomId]?.get() == generation) {
+                mutableState.value = mutableState.value.copy(
+                    botGroups = mutableState.value.botGroups.copy(runningRoomId = null),
+                )
+            }
+        }
+    }
+
+    fun acknowledgeBotGroup(roomId: String) {
+        if (mutableState.value.botGroups.blockingRequests.any { it.roomId == roomId }) return
+        mutableState.value = mutableState.value.copy(
+            botGroups = mutableState.value.botGroups.copy(
+                needsYouRoomIds = mutableState.value.botGroups.needsYouRoomIds - roomId,
+            ),
+        )
+        scope.launch { rehydrateBotGroupBlocking(roomId) }
+    }
+
+    private suspend fun runBotGroupMemberTurn(
+        room: BotGroupRoom,
+        member: BotGroupMember,
+        thread: String,
+        attachments: List<BotGroupAttachment>,
+        generation: Long,
+    ): BotGroupTurnResult = withBotGateway(member.connectionId.ifBlank { requireNotNull(mutableState.value.backend).id }) { client, _ ->
+        val title = "Group: ${room.roomId}"
+        val existingState = botGroupSessionState(client, room, member)
+        val existing = existingState?.session
+        val resumed = existingState?.state
+        if (resumed != null && (resumed.running || resumed.inflight != null || syncBotGroupBlocking(room.roomId, member, resumed))) {
+            return@withBotGateway BotGroupTurnResult(strandedBefore = resumed.messages.size)
+        }
+        val created = if (resumed == null) {
+            client.request(
+                "session.create",
+                buildJsonObject {
+                    put("profile", member.name)
+                    put("title", title)
+                    put("hidden", true)
+                },
+            ).let { json.decodeFromJsonElement(SessionCreateResult.serializer(), it) }
+        } else null
+        val runtime = resumed?.runtimeSessionId ?: requireNotNull(created).runtimeSessionId
+        val before = resumed?.messages?.size ?: created?.messages?.size ?: 0
+        val threadLog = room.log.filter { it.thread == thread }.takeLast(24)
+        val peerNames = room.members.filter { botGroupMemberKey(it) != botGroupMemberKey(member) }
+            .joinToString { "@${it.handle.ifBlank { it.name }}" }
+        val fileRefs = mutableListOf<String>()
+        val unavailableAttachments = mutableListOf<String>()
+        attachments.forEach { attachment ->
+            try {
+                when {
+                    attachment.mimeType.startsWith("image/") -> client.request(
+                        "image.attach_bytes",
+                        buildJsonObject {
+                            put("session_id", runtime)
+                            put("content_base64", attachment.base64)
+                            put("filename", attachment.name)
+                        },
+                    ).let { result ->
+                        val attached = json.decodeFromJsonElement(ImageAttachResult.serializer(), result)
+                        require(attached.attached && attached.path.isNotBlank()) { "Hermes did not attach the image" }
+                    }
+                    attachment.mimeType == "application/pdf" -> client.request(
+                        "pdf.attach",
+                        buildJsonObject {
+                            put("session_id", runtime)
+                            put("content_base64", attachment.base64)
+                            put("filename", attachment.name)
+                        },
+                    ).let { result ->
+                        val attached = json.decodeFromJsonElement(PdfAttachResult.serializer(), result)
+                        require(
+                            attached.attached && attached.pages.isNotEmpty() &&
+                                attached.pages.size == attached.pagesAttached && attached.pages.all { it.path.isNotBlank() },
+                        ) { "Hermes did not attach the PDF pages" }
+                    }
+                    else -> client.request(
+                        "file.attach",
+                        buildJsonObject {
+                            put("session_id", runtime)
+                            put("name", attachment.name)
+                            put("path", attachment.name)
+                            put("data_url", "data:${attachment.mimeType};base64,${attachment.base64}")
+                        },
+                    ).also { result ->
+                        val attached = json.decodeFromJsonElement(FileAttachResult.serializer(), result)
+                        require(attached.attached && attached.uploaded && attached.refText.isNotBlank()) {
+                            "Hermes did not attach the file"
+                        }
+                        fileRefs += attached.refText
+                    }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Throwable) {
+                unavailableAttachments += attachment.name
+            }
+        }
+        val prompt = buildString {
+            appendLine("[Group chat: \"${room.name}\"] You are @${member.handle.ifBlank { member.name }}, one participant with $peerNames and the user.")
+            appendLine("New room messages (oldest first):")
+            threadLog.forEach { entry ->
+                val source = entry.from.source.takeIf(String::isNotBlank)?.let { " [$it]" }.orEmpty()
+                appendLine("  ${entry.from.name}$source: ${entry.text}")
+            }
+            append("Reply with one conversational message only if you have something new to add. Reply exactly (pass) if not. Mention @user only when human input is needed. Never reveal private 1:1 chats.")
+            if (fileRefs.isNotEmpty()) append("\nAttached file references: ${fileRefs.joinToString()}")
+            if (unavailableAttachments.isNotEmpty()) {
+                append("\nThese attachments were unavailable to you: ${unavailableAttachments.joinToString()}.")
+            }
+        }
+        updateBotGroup(
+            room.copy(stranded = room.stranded + (botGroupMemberKey(member) to BotGroupStranded(before, thread))),
+        )
+        if (botGroupRuns[room.roomId]?.get() != generation) return@withBotGateway BotGroupTurnResult(strandedBefore = before)
+        client.request("prompt.submit", buildJsonObject { put("session_id", runtime); put("text", prompt) })
+        val started = System.currentTimeMillis()
+        var deadline = started + 180_000
+        val hardDeadline = started + 1_200_000
+        while (System.currentTimeMillis() < deadline) {
+            delay(1_000)
+            val state = client.request(
+                "session.resume",
+                buildJsonObject {
+                    put("session_id", existing?.id ?: created?.durableSessionId ?: runtime)
+                    put("profile", member.name)
+                },
+            ).let { json.decodeFromJsonElement(SessionResumeResult.serializer(), it) }
+            val awaitingUser = syncBotGroupBlocking(room.roomId, member, state)
+            if (!state.running && state.inflight == null && !awaitingUser && state.messages.size > before) {
+                val indexed = state.messages.withIndex().lastOrNull { it.value.role == "assistant" }
+                return@withBotGateway BotGroupTurnResult(
+                    text = indexed?.value?.botGroupText(),
+                    messageId = indexed?.let { it.value.id ?: "${state.durableSessionId ?: runtime}:${it.index}" },
+                    notice = unavailableAttachments.takeIf(List<String>::isNotEmpty)?.let {
+                        "${member.name} could not receive ${it.joinToString()}."
+                    },
+                    completed = true,
+                )
+            }
+            if (state.running || state.inflight != null || awaitingUser) {
+                deadline = minOf(hardDeadline, maxOf(deadline, System.currentTimeMillis() + 180_000))
+            }
+        }
+        BotGroupTurnResult(
+            strandedBefore = before,
+            notice = unavailableAttachments.takeIf(List<String>::isNotEmpty)?.let {
+                "${member.name} could not receive ${it.joinToString()}."
+            },
+        )
+    }
+
+    private suspend fun harvestBotGroupReply(room: BotGroupRoom, member: BotGroupMember): BotGroupRoom {
+        val key = botGroupMemberKey(member)
+        val marker = room.stranded[key] ?: return room
+        return try {
+            withBotGateway(member.connectionId.ifBlank { requireNotNull(mutableState.value.backend).id }) { client, _ ->
+                val resumed = botGroupSessionState(client, room, member)
+                val session = resumed?.session
+                    ?: return@withBotGateway updateBotGroup(room.copy(stranded = room.stranded - key))
+                val state = requireNotNull(resumed).state
+                if (state.running || state.inflight != null || syncBotGroupBlocking(room.roomId, member, state)) {
+                    return@withBotGateway room
+                }
+                val indexed = state.messages.withIndex().lastOrNull { it.index >= marker.before && it.value.role == "assistant" }
+                val reply = indexed?.value?.botGroupText().orEmpty()
+                var next = room.copy(stranded = room.stranded - key)
+                if (reply.isNotBlank() && !isBotGroupPass(reply)) {
+                    val messageId = indexed?.value?.id ?: "${state.durableSessionId ?: session.id}:${indexed?.index ?: marker.before}"
+                    if (next.log.none { it.id == messageId }) {
+                        next = next.copy(log = next.log + BotGroupEntry(
+                            id = messageId,
+                            from = BotGroupSpeaker("member", member.name, member.connectionLabel),
+                            text = reply,
+                            at = System.currentTimeMillis(),
+                            thread = marker.thread,
+                        ))
+                    }
+                }
+                updateBotGroup(next).also {
+                    if (Regex("@user\\b", RegexOption.IGNORE_CASE).containsMatchIn(reply)) {
+                        mutableState.value = mutableState.value.copy(
+                            botGroups = mutableState.value.botGroups.copy(
+                                needsYouRoomIds = mutableState.value.botGroups.needsYouRoomIds + room.roomId,
+                            ),
+                        )
+                    }
+                }
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Throwable) {
+            runCatching {
+                updateBotGroup(room.withBotGroupNotice("${member.name}'s late reply is still waiting to reconnect.", marker.thread))
+            }.getOrDefault(room)
+        }
+    }
+
+    private fun BotGroupRoom.withBotGroupNotice(text: String, thread: String = "main") = copy(
+        log = log + BotGroupEntry(
+            id = UUID.randomUUID().toString(),
+            from = BotGroupSpeaker("system", "Hermes"),
+            text = text,
+            at = System.currentTimeMillis(),
+            thread = thread,
+        ),
+    )
+
+    private suspend fun botGroupSessionState(
+        client: HermesGatewayClient,
+        room: BotGroupRoom,
+        member: BotGroupMember,
+    ): BotGroupSessionState? {
+        val session = client.request(
+            "session.list",
+            buildJsonObject {
+                put("profile", member.name)
+                put("title", "Group: ${room.roomId}")
+                put("include_hidden", true)
+                put("limit", 1)
+            },
+        ).let { json.decodeFromJsonElement(BotSessionPage.serializer(), it) }.sessions.firstOrNull() ?: return null
+        val state = client.request(
+            "session.resume",
+            buildJsonObject {
+                put("session_id", session.resolvedId ?: session.id)
+                put("profile", member.name)
+            },
+        ).let { json.decodeFromJsonElement(SessionResumeResult.serializer(), it) }
+        return BotGroupSessionState(session, state)
+    }
+
+    private suspend fun interruptBotGroupSessions(room: BotGroupRoom): List<String> {
+        val failed = mutableListOf<String>()
+        room.members.forEach { member ->
+            try {
+                withBotGateway(member.connectionId.ifBlank { requireNotNull(mutableState.value.backend).id }) { client, _ ->
+                    val running = botGroupSessionState(client, room, member) ?: return@withBotGateway
+                    if (running.state.running || running.state.inflight != null) {
+                        client.request(
+                            "session.interrupt",
+                            buildJsonObject { put("session_id", running.state.runtimeSessionId) },
+                        )
+                    }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Throwable) {
+                failed += member.handle.ifBlank { member.name }
+            }
+        }
+        return failed
+    }
+
+    private suspend fun rehydrateBotGroupBlocking(roomId: String) {
+        val room = mutableState.value.botGroups.rooms.firstOrNull { it.roomId == roomId } ?: return
+        val failed = mutableListOf<String>()
+        room.members.forEach { member ->
+            try {
+                withBotGateway(member.connectionId.ifBlank { requireNotNull(mutableState.value.backend).id }) { client, _ ->
+                    botGroupSessionState(client, room, member)?.state?.let {
+                        syncBotGroupBlocking(roomId, member, it)
+                    }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Throwable) {
+                failed += member.handle.ifBlank { member.name }
+            }
+        }
+        if (failed.isNotEmpty() && mutableState.value.botGroups.rooms.any { it.roomId == roomId }) {
+            mutableState.value = mutableState.value.copy(
+                botGroups = mutableState.value.botGroups.copy(
+                    error = "Could not refresh pending requests for ${failed.joinToString()}; opening the room again retries.",
+                ),
+            )
+        }
+    }
+
+    private fun syncBotGroupBlocking(
+        roomId: String,
+        member: BotGroupMember,
+        state: SessionResumeResult,
+    ): Boolean {
+        val clarify = state.pendingClarify?.takeIf { it.requestId.isNotBlank() }
+        val approval = state.pendingApproval?.takeIf { it.requestId.isNotBlank() }
+        val pending = clarify?.let { request ->
+            BotGroupBlockingRequest(
+                roomId = roomId,
+                member = member,
+                sessionId = state.runtimeSessionId,
+                requestId = request.requestId,
+                kind = "clarify",
+                prompt = request.question,
+                choices = request.choices,
+                questions = request.questions.mapNotNull { question ->
+                    (question.qid ?: question.id)?.takeIf(String::isNotBlank)?.let { id ->
+                        BotGroupQuestion(id, question.question, question.choices, question.multiSelect)
+                    }
+                },
+            )
+        } ?: approval?.let { request ->
+            BotGroupBlockingRequest(
+                roomId = roomId,
+                member = member,
+                sessionId = state.runtimeSessionId,
+                requestId = request.requestId,
+                kind = "approval",
+                prompt = request.description,
+                command = request.command,
+                choices = request.choices.ifEmpty { listOf("once", "deny") },
+            )
+        }
+        val keyMatches: (BotGroupBlockingRequest) -> Boolean = {
+            it.roomId == roomId && botGroupMemberKey(it.member) == botGroupMemberKey(member)
+        }
+        val current = mutableState.value.botGroups
+        val retained = current.blockingRequests.filterNot(keyMatches)
+        mutableState.value = mutableState.value.copy(
+            botGroups = current.copy(
+                blockingRequests = pending?.let { retained + it } ?: retained,
+                needsYouRoomIds = if (pending != null) current.needsYouRoomIds + roomId else current.needsYouRoomIds,
+            ),
+        )
+        return pending != null
+    }
+
+    suspend fun answerBotGroupBlocking(requestId: String, answers: Map<String, List<String>>) {
+        val request = mutableState.value.botGroups.blockingRequests.firstOrNull { it.requestId == requestId }
+            ?: throw IllegalArgumentException("That group request is no longer pending")
+        withBotGateway(request.member.connectionId.ifBlank { requireNotNull(mutableState.value.backend).id }) { client, _ ->
+            if (request.kind == "approval") {
+                client.request(
+                    "approval.respond",
+                    buildJsonObject {
+                        put("session_id", request.sessionId)
+                        put("request_id", request.requestId)
+                        put("choice", answers["choice"]?.firstOrNull().orEmpty().ifBlank { "deny" })
+                    },
+                )
+            } else if (request.questions.isNotEmpty()) {
+                request.questions.forEach { question ->
+                    client.request(
+                        "clarify.respond",
+                        buildJsonObject {
+                            put("request_id", request.requestId)
+                            put("question_id", question.id)
+                            val answer = answers[question.id].orEmpty()
+                            put("answer", if (question.multiSelect) JsonArray(answer.map(::JsonPrimitive)) else JsonPrimitive(answer.firstOrNull().orEmpty()))
+                        },
+                    )
+                }
+            } else {
+                client.request(
+                    "clarify.respond",
+                    buildJsonObject {
+                        put("request_id", request.requestId)
+                        put("answer", answers["answer"]?.firstOrNull().orEmpty())
+                    },
+                )
+            }
+        }
+        val groups = mutableState.value.botGroups
+        val remaining = groups.blockingRequests.filterNot { it.requestId == request.requestId }
+        mutableState.value = mutableState.value.copy(
+            botGroups = groups.copy(
+                blockingRequests = remaining,
+                needsYouRoomIds = if (remaining.none { it.roomId == request.roomId }) {
+                    groups.needsYouRoomIds - request.roomId
+                } else {
+                    groups.needsYouRoomIds
+                },
+            ),
+        )
+    }
+
+    private fun ProtocolMessage.botGroupText(): String = when (val value = content) {
+        is JsonPrimitive -> value.content
+        is JsonArray -> value.joinToString("") { part ->
+            when (part) {
+                is JsonPrimitive -> part.content
+                is JsonObject -> part["text"]?.jsonPrimitive?.content.orEmpty()
+                else -> ""
+            }
+        }
+        else -> text.orEmpty()
+    }.trim()
+
+    private suspend fun mutateBotGroups(transform: (BotGroupSnapshot) -> BotGroupSnapshot) = botGroupMutex.withLock {
+        val active = requireNotNull(mutableState.value.backend)
+        var lastFailure: Throwable? = null
+        repeat(3) { attempt ->
+            var combined = BotGroupSnapshot()
+            val targets = mutableListOf<BotGroupSyncTarget>()
+            val unavailable = mutableListOf<String>()
+            for (backend in mutableState.value.savedBackends.sortedByDescending { it.id == active.id }) {
+                try {
+                    withBotGateway(backend.id) { client, source ->
+                        val profiles = client.request("profiles.list", buildJsonObject { put("include_sessions", false) })
+                            .let { json.decodeFromJsonElement(ProfilesResponse.serializer(), it) }
+                        val profile = profiles.profiles.firstOrNull { it.name == "default" }
+                            ?: throw IllegalStateException("Hermes default profile is unavailable")
+                        val sourceSnapshot = profileGroupSnapshot(profile, json)
+                        combined = mergeBotGroupSnapshots(combined, sourceSnapshot)
+                        targets += BotGroupSyncTarget(source, profile.uiMetaRevisions[BOT_GROUP_META_KEY], sourceSnapshot)
+                    }
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (cause: Throwable) {
+                    if (backend.id == active.id) throw cause
+                    unavailable += backend.label
+                }
+            }
+            val snapshot = transform(combined).boundedForGateway(json)
+            check(targets.any { it.backend.id == active.id }) { "Active Hermes source is unavailable" }
+            var synchronized = true
+            for (target in targets) {
+                if (target.snapshot == snapshot) continue
+                val result = runCatching {
+                    withBotGateway(target.backend.id) { client, _ ->
+                        client.request(
+                            "profiles.configure",
+                            buildJsonObject {
+                                put("name", "default")
+                                put("ui_meta", buildJsonObject { put(BOT_GROUP_META_KEY, snapshot.asUiMeta(json)) })
+                                put("ui_meta_expected_revisions", buildJsonObject {
+                                    put(BOT_GROUP_META_KEY, target.expectedRevision ?: 0L)
+                                })
+                            },
+                        )
+                    }
+                }
+                val applied = runCatching { result.getOrNull()?.jsonObject?.get("applied")?.jsonObject }.getOrNull()
+                val revision = runCatching {
+                    applied?.get("ui_meta_revisions")?.jsonObject?.get(BOT_GROUP_META_KEY)?.jsonPrimitive?.content?.toLongOrNull()
+                }.getOrNull()
+                if (
+                    applied?.get("ui_meta")?.jsonPrimitive?.booleanOrNull != true ||
+                    (target.expectedRevision != null && revision != target.expectedRevision + 1)
+                ) {
+                    synchronized = false
+                    lastFailure = result.exceptionOrNull()
+                    break
+                }
+            }
+            if (synchronized) {
+                val pendingSources = unavailable.takeIf {
+                    snapshot.rooms.isNotEmpty() || snapshot.deleted.isNotEmpty()
+                }.orEmpty()
+                pendingBotGroupSnapshot = if (pendingSources.isNotEmpty()) {
+                    pendingBotGroupSnapshot?.let { mergeBotGroupSnapshots(it, snapshot) } ?: snapshot
+                } else {
+                    null
+                }
+                botGroupMutationGeneration.incrementAndGet()
+                mutableState.value = mutableState.value.copy(
+                    botGroups = mutableState.value.botGroups.copy(
+                        rooms = snapshot.visibleRooms(),
+                        error = pendingSources.takeIf(List<String>::isNotEmpty)?.let {
+                            "Group saved; sync will retry when ${it.joinToString()} reconnects."
+                        },
+                    ),
+                )
+                if (pendingSources.isNotEmpty()) scheduleBotGroupSyncRetry()
+                return@withLock
+            }
+            if (attempt == 2) throw lastFailure
+                ?: IllegalStateException("Hermes rejected the group update after concurrent changes")
+            check(mutableState.value.backend?.id == active.id) { "Backend changed during group update" }
+        }
+    }
+
+    private fun scheduleBotGroupSyncRetry() {
+        if (botGroupSyncJob?.isActive == true) return
+        botGroupSyncJob = scope.launch {
+            for (retryDelay in listOf(5_000L, 15_000L, 30_000L, 60_000L, 120_000L)) {
+                delay(retryDelay)
+                val saved = runCatching {
+                    mutateBotGroups { snapshot ->
+                        pendingBotGroupSnapshot?.let { mergeBotGroupSnapshots(snapshot, it) } ?: snapshot
+                    }
+                }.isSuccess
+                val pending = mutableState.value.botGroups.error?.startsWith("Group saved; sync will retry") == true
+                if (saved && !pending) return@launch
+            }
+            mutableState.value = mutableState.value.copy(
+                botGroups = mutableState.value.botGroups.copy(
+                    error = "Some Bot group sources remain offline. Reconnect or refresh to retry sync.",
+                ),
+            )
+        }
+    }
+
+    suspend fun describeBotAgent(profileName: String): ProfileDescription {
+        val name = profileName.trim()
+        require(name.isNotEmpty()) { "Hermes profile is required" }
+        return gateway.request("profiles.describe", buildJsonObject { put("name", name) })
+            .let { json.decodeFromJsonElement(ProfileDescription.serializer(), it) }
+    }
+
+    suspend fun createBotAgent(
+        draft: BotAgentDraft,
+        backendId: String = mutableState.value.backend?.id.orEmpty(),
+        cloneFrom: String? = null,
+        cloneAll: Boolean = false,
+        noSkills: Boolean = false,
+        mirrorCredentials: Boolean = true,
+    ): Boolean {
+        val name = draft.name.trim()
+        require(name.isNotEmpty()) { "Agent name is required" }
+        val creationKey = BotProfileKey(backendId, name.normalizedProfile())
+        return try {
+            withBotGateway(backendId) { client, _ ->
+                if (creationKey !in pendingBotCreations) {
+                    client.request(
+                        "profiles.create",
+                        buildJsonObject {
+                            put("name", name)
+                            put("description", draft.description.trim())
+                            cloneFrom?.trim()?.takeIf(String::isNotEmpty)?.let { put("clone_from", it) }
+                            put("clone_all", cloneAll)
+                            put("no_skills", noSkills)
+                            put("soul", draft.soul)
+                            if (draft.provider.isNotBlank() && draft.model.isNotBlank()) {
+                                put("provider", draft.provider.trim())
+                                put("model", draft.model.trim())
+                            }
+                            put("mirror_credentials", mirrorCredentials)
+                            put("share_auth", mirrorCredentials)
+                        },
+                    )
+                    pendingBotCreations += creationKey
+                }
+                val opened = if (mutableState.value.backend?.id == backendId) {
+                    refreshProfiles()
+                    openCanonicalBotChat(name)
+                } else {
+                    createRemoteCanonicalBotChat(client, name)
+                }
+                if (opened) pendingBotCreations -= creationKey
+                opened
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Throwable) {
+            fail(error)
+            false
+        }
+    }
+
+    private suspend fun createRemoteCanonicalBotChat(client: HermesGatewayClient, profile: String): Boolean {
+        val existing = client.request(
+            "session.list",
+            buildJsonObject {
+                put("profile", profile)
+                put("title", BOT_CHAT_TITLE)
+                put("limit", 200)
+                put("include_hidden", true)
+            },
+        ).let { json.decodeFromJsonElement(BotSessionPage.serializer(), it) }
+            .sessions.firstOrNull(BotSessionSummary::isCanonicalBotChat)
+        if (existing != null) return true
+        val created = client.request(
+            "session.create",
+            buildJsonObject {
+                put("profile", profile)
+                put("title", BOT_CHAT_TITLE)
+                put("hidden", true)
+            },
+        ).let { json.decodeFromJsonElement(SessionCreateResult.serializer(), it) }
+        val runtimeId = created.runtimeSessionId.takeIf(String::isNotBlank)
+            ?: throw IllegalStateException("Hermes did not return the new Bot Chat")
+        try {
+            client.request(
+                "session.title",
+                buildJsonObject {
+                    put("session_id", runtimeId)
+                    put("title", BOT_CHAT_TITLE)
+                },
+            )
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: HermesRpcException) {
+            if (error.rpcCode != -32601) throw error
+            // The create call already persisted the title on current Hermes.
+        }
+        client.request(
+            "prompt.submit",
+            buildJsonObject {
+                put("session_id", runtimeId)
+                put("text", BOT_CHAT_INTRO)
+            },
+        )
+        return true
+    }
+
+    suspend fun configureBotAgent(draft: BotAgentDraft) {
+        val name = draft.name.trim()
+        require(name.isNotEmpty()) { "Agent name is required" }
+        val response = gateway.request(
+            "profiles.configure",
+            buildJsonObject {
+                put("name", name)
+                put("description", draft.description.trim())
+                put("soul", draft.soul)
+                if (draft.provider.isNotBlank() && draft.model.isNotBlank()) {
+                    put("provider", draft.provider.trim())
+                    put("model", draft.model.trim())
+                }
+                put("disabled_skills", JsonArray(draft.disabledSkills.sorted().map(::JsonPrimitive)))
+                put("enabled_toolsets", JsonArray(draft.enabledToolsets.sorted().map(::JsonPrimitive)))
+                put("enabled_mcp_servers", JsonArray(draft.enabledMcpServers.sorted().map(::JsonPrimitive)))
+            },
+        ).let { json.decodeFromJsonElement(ProfileConfigureResult.serializer(), it) }
+        require(response.ok) {
+            val failed = response.applied.filterValues { it.jsonPrimitive.booleanOrNull != true }.keys
+            "Hermes could not save ${failed.joinToString().ifBlank { "the agent configuration" }}"
+        }
+        refreshProfiles()
+    }
+
+    suspend fun profileAvatar(profileName: String): ProfileAsset = gateway.request(
+        "profiles.get_asset",
+        buildJsonObject {
+            put("name", profileName.trim())
+            put("asset", "avatar")
+        },
+    ).let { json.decodeFromJsonElement(ProfileAsset.serializer(), it) }
+
+    suspend fun botProfileAvatar(backendId: String, profileName: String): ProfileAsset =
+        withBotGateway(backendId) { client, _ ->
+            client.request(
+                "profiles.get_asset",
+                buildJsonObject {
+                    put("name", profileName.trim())
+                    put("asset", "avatar")
+                },
+            ).let { json.decodeFromJsonElement(ProfileAsset.serializer(), it) }
+        }
+
+    suspend fun setProfileAvatar(profileName: String, dataUrl: String?) {
+        val response = gateway.request(
+            "profiles.set_asset",
+            buildJsonObject {
+                put("name", profileName.trim())
+                put("asset", "avatar")
+                if (dataUrl == null) put("clear", true) else put("data", dataUrl)
+            },
+        )
+        require(response.jsonObject["ok"]?.jsonPrimitive?.booleanOrNull == true) { "Hermes did not save the avatar" }
+        refreshProfiles()
+    }
+
+    suspend fun generateProfileAvatar(profileName: String, prompt: String): String {
+        val cleanPrompt = prompt.trim()
+        require(cleanPrompt.isNotEmpty()) { "Describe the avatar you want" }
+        val result = gateway.request(
+            "image.generate",
+            buildJsonObject {
+                put("prompt", cleanPrompt)
+                put("aspect_ratio", "square")
+                put("max_bytes", 2_000_000)
+            },
+        ).let { json.decodeFromJsonElement(ImageGenerationResult.serializer(), it) }
+        require(result.available && result.success) { result.error ?: "Image generation is unavailable" }
+        val image = result.imageData
+            ?: result.image?.takeIf { it.startsWith("data:image/") }
+            ?: result.image?.let { restClient.publicImageDataUrl(it) }
+            ?: throw IllegalStateException("Hermes could not return this image to Android")
+        setProfileAvatar(profileName, image)
+        return image
+    }
+
+    suspend fun profilePetGallery(profileName: String): PetGallery = gateway.request(
+        "pet.gallery",
+        buildJsonObject {
+            put("profile", profileName.trim())
+            put("localOnly", false)
+        },
+    ).let { json.decodeFromJsonElement(PetGallery.serializer(), it) }
+
+    suspend fun adoptProfilePet(profileName: String, slug: String): String {
+        val profile = profileName.trim()
+        val pet = slug.trim()
+        require(profile.isNotEmpty() && pet.isNotEmpty()) { "Choose a pet" }
+        gateway.request(
+            "pet.select",
+            buildJsonObject {
+                put("profile", profile)
+                put("slug", pet)
+            },
+        )
+        val cells = gateway.request(
+            "pet.cells",
+            buildJsonObject {
+                put("profile", profile)
+                put("state", "idle")
+                put("cols", 24)
+            },
+        ).jsonObject
+        require(cells["enabled"]?.jsonPrimitive?.booleanOrNull == true) { "Hermes could not render that pet" }
+        val frame = cells["frames"]?.jsonArray?.firstOrNull()?.jsonArray
+            ?: throw IllegalStateException("Hermes returned no pet artwork")
+        val rows = frame.map { it.jsonArray }
+        val width = rows.firstOrNull()?.size ?: throw IllegalStateException("Hermes returned empty pet artwork")
+        require(width in 1..64 && rows.size in 1..64) { "Hermes returned oversized pet artwork" }
+        val bitmap = android.graphics.Bitmap.createBitmap(width, rows.size * 2, android.graphics.Bitmap.Config.ARGB_8888)
+        rows.forEachIndexed { y, row ->
+            require(row.size == width) { "Hermes returned malformed pet artwork" }
+            row.forEachIndexed { x, encoded ->
+                val rgba = encoded.jsonArray.map { it.jsonPrimitive.int }
+                require(rgba.size == 8 && rgba.all { it in 0..255 }) { "Hermes returned malformed pet colours" }
+                bitmap.setPixel(x, y * 2, android.graphics.Color.argb(rgba[3], rgba[0], rgba[1], rgba[2]))
+                bitmap.setPixel(x, y * 2 + 1, android.graphics.Color.argb(rgba[7], rgba[4], rgba[5], rgba[6]))
+            }
+        }
+        val bytes = java.io.ByteArrayOutputStream().use { output ->
+            check(bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, output))
+            output.toByteArray()
+        }
+        bitmap.recycle()
+        val data = "data:image/png;base64,${android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)}"
+        setProfileAvatar(profile, data)
+        return data
     }
 
     suspend fun entryAuthoritySnapshot(includeCronJobs: Boolean): EntryAuthoritySnapshot? = try {
@@ -4560,6 +6236,9 @@ class HermesRepository @Inject constructor(
         require(
             mutableState.value.activeStoredSession?.durableId != session.durableId,
         ) { "Close an active session before deleting it" }
+        val requestBackendId = mutableState.value.backend?.id
+        val credentialGeneration = backendCredentialGeneration.get()
+        val cleanupProfile = session.profile ?: mutableState.value.activeProfile
         runCatching {
             val response = gateway.request(
                 "session.delete",
@@ -4569,22 +6248,30 @@ class HermesRepository @Inject constructor(
                 require(it.deleted == session.durableId) { "Hermes deleted a different session than requested" }
             }
         }.onSuccess {
-            val backendId = mutableState.value.backend?.id
-            if (backendId != null) {
-                val profile = session.profile ?: mutableState.value.activeProfile
-                draftStore.remove(DraftContext(backendId, profile, session.durableId))
-                composerQueueStore.remove(ComposerQueueContext(backendId, profile, session.durableId))
+            if (requestBackendId != null) {
+                markSessionListMutation(requestBackendId, credentialGeneration)
+                draftStore.remove(DraftContext(requestBackendId, cleanupProfile, session.durableId))
+                composerQueueStore.remove(ComposerQueueContext(requestBackendId, cleanupProfile, session.durableId))
             }
-            mutableState.value = mutableState.value.copy(
-                sessions = mutableState.value.sessions.filterNot {
-                    it.durableId == session.durableId &&
-                        it.profile.normalizedProfile() == session.profile.normalizedProfile()
-                },
-                error = null,
-            )
+            mutableState.update { current ->
+                if (
+                    current.backend?.id != requestBackendId ||
+                    backendCredentialGeneration.get() != credentialGeneration
+                ) {
+                    current
+                } else {
+                    current.copy(
+                        sessions = current.sessions.filterNot {
+                            it.durableId == session.durableId &&
+                                it.profile.normalizedProfile() == session.profile.normalizedProfile()
+                        },
+                        error = null,
+                    )
+                }
+            }
         }.onFailure { error ->
             if (error is CancellationException) throw error
-            fail(error)
+            requestBackendId?.let { reportCurrentBackendMutationFailure(error, it, credentialGeneration) }
         }
     }
 
@@ -4614,6 +6301,7 @@ class HermesRepository @Inject constructor(
                 gatewayBackendId = null
                 tokenStore.remove(backend.id)
                 backendRegistry.remove(backend.id)
+                invalidateBotRoster(backend.id)
             } finally {
                 mutableState.value = mutableState.value.copy(backendTransitionInProgress = false)
             }
@@ -4663,6 +6351,7 @@ class HermesRepository @Inject constructor(
                 billingPendingChargeStore.remove(id)
                 tokenStore.remove(id)
                 backendRegistry.remove(id)
+                invalidateBotRoster(id)
             } finally {
                 if (active) mutableState.value = mutableState.value.copy(backendTransitionInProgress = false)
             }
@@ -4694,6 +6383,11 @@ class HermesRepository @Inject constructor(
 
     private suspend fun connect(backend: BackendConfig) {
         sessionListMutationMutex.withLock { backendCredentialGeneration.incrementAndGet() }
+        sessionListRefreshPriorityMutex.withLock {
+            visibleSessionListRefreshGeneration.set(0L)
+            silentSessionListRefreshGeneration.set(0L)
+            pendingSilentSessionListRefresh.set(false)
+        }
         sessionTargetMutex.withLock { archivedSessionTargets.clear() }
         invalidatePendingAttachments()
         providerOAuthPollJob?.cancelAndJoin()
@@ -5095,6 +6789,27 @@ class HermesRepository @Inject constructor(
         )
     }
 
+    private suspend fun <T> withBotGateway(
+        backendId: String,
+        action: suspend (HermesGatewayClient, BackendConfig) -> T,
+    ): T {
+        val current = mutableState.value
+        val backend = current.savedBackends.firstOrNull { it.id == backendId }
+            ?: throw IllegalArgumentException("Unknown Hermes backend")
+        if (current.backend?.id == backendId) return action(gateway, backend)
+        require(backend.authMode == AuthMode.DASHBOARD_SESSION) { "Reconnect this backend before managing its agents" }
+        val credential = tokenStore.get(backend.id)
+            ?: throw ReconnectRequiredException("Dashboard session is unavailable for ${backend.label}; reconnect is required.")
+        val scoped = gateway.fork()
+        require(scoped !== gateway) { "This Hermes transport cannot isolate a second backend" }
+        scoped.connect(backend, credential)
+        return try {
+            action(scoped, backend)
+        } finally {
+            scoped.disconnect()
+        }
+    }
+
     private suspend fun activeCredentials(
         allowRecovery: Boolean = false,
         allowRehydrating: Boolean = false,
@@ -5194,7 +6909,25 @@ class HermesRepository @Inject constructor(
         mutableState.value = mutableState.value.copy(loading = value)
     }
 
+    private fun failSessionListRefresh(error: Throwable) {
+        if (error.isSessionAuthenticationFailure()) {
+            fail(error)
+        } else {
+            mutableState.update {
+                it.copy(
+                    sessionListLoading = false,
+                    sessionListError = error.message ?: "Could not refresh conversations",
+                )
+            }
+        }
+    }
+
+    private fun Throwable.isSessionAuthenticationFailure(): Boolean =
+        this is ReconnectRequiredException ||
+            (this is com.nousresearch.hermes.network.HermesHttpException && statusCode in setOf(401, 403))
+
     private fun fail(error: Throwable) {
+        if (error is CancellationException) throw error
         val reconnect = error is ReconnectRequiredException || (error is com.nousresearch.hermes.network.HermesHttpException && error.statusCode in setOf(401, 403))
         val reconnectBackendId = mutableState.value.backend?.id
         if (reconnect) {
@@ -5205,6 +6938,8 @@ class HermesRepository @Inject constructor(
             gatewayBackendId = null
             mutableState.value = mutableState.value.copy(
                 loading = false,
+                sessionListLoading = false,
+                sessionListError = null,
                 sending = false,
                 activeStoredSession = null,
                 runtimeSessionId = null,
@@ -5231,6 +6966,8 @@ class HermesRepository @Inject constructor(
                         backend = null,
                         status = null,
                         sessions = emptyList(),
+                        sessionListLoading = false,
+                        sessionListError = null,
                         reconnectRequiredBackendId = reconnectBackendId,
                     )
                 }
@@ -5269,6 +7006,12 @@ class HermesRepository @Inject constructor(
             reconnectRequiredBackendId = mutableState.value.reconnectRequiredBackendId,
             error = error.message ?: error::class.simpleName ?: "Hermes operation failed",
         )
+    }
+
+    fun consumeError(message: String) {
+        mutableState.update { current ->
+            if (current.error == message) current.copy(error = null) else current
+        }
     }
 
     private fun failAgents(error: Throwable) {
@@ -5385,6 +7128,7 @@ class HermesRepository @Inject constructor(
                     mutableState.value = mutableState.value.copy(error = null)
                     val active = mutableState.value.activeStoredSession
                     if (active != null) runCatching { openSession(active) }
+                    runCatching { refreshProfiles(showLoading = false) }
                     return@launch
                 }
                 mutableState.value = mutableState.value.copy(
@@ -5441,6 +7185,21 @@ private fun sessionTarget(backendId: String, session: StoredSession): SessionTar
         sessionId = session.durableId,
     )
 
+private fun BotSessionSummary.isCanonicalBotChat(): Boolean =
+    rootTitle == BOT_CHAT_TITLE || (rootTitle.isNullOrBlank() && title == BOT_CHAT_TITLE)
+
+private fun BotSessionSummary.toStoredSession(profileName: String) = StoredSession(
+    sessionId = resolvedId ?: id,
+    id = id,
+    title = title,
+    rootTitle = rootTitle,
+    profile = profileName,
+    source = source,
+    messageCount = messageCount,
+    startedAt = startedAt,
+    lastActive = lastActive,
+)
+
 private fun Throwable.isMissingSessionFailure(): Boolean {
     val message = generateSequence(this) { it.cause }
         .joinToString(" ") { it.message.orEmpty() }
@@ -5452,6 +7211,8 @@ private fun Throwable.isMissingSessionFailure(): Boolean {
 }
 
 private const val DIAGNOSTIC_POLL_INTERVAL_MILLIS = 1_000L
+internal const val BOT_CHAT_TITLE = "Bot Chat"
+private const val BOT_CHAT_INTRO = "Hey, tell me about yourself!"
 private const val DIAGNOSTIC_POLL_LIMIT = 120
 private const val DRAFT_SAVE_DEBOUNCE_MILLIS = 300L
 private const val MAX_SHARED_ATTACHMENTS = 5

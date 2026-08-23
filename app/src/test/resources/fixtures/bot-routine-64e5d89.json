@@ -1,0 +1,12 @@
+{
+  "id": "weekly",
+  "enabled": true,
+  "name": "[bot:reviewer_bot] Weekly review",
+  "prompt": "Review the week",
+  "schedule": {
+    "display": "0 17 * * 5",
+    "expr": "0 17 * * 5",
+    "kind": "cron"
+  },
+  "future_field": "ignored"
+}

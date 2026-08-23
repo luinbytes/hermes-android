@@ -78,14 +78,22 @@ class MainActivity : ComponentActivity() {
             }
             val biometricReentry by biometricReentryFlow.collectAsStateWithLifecycle(initialValue = null)
             val skin by privacyPreferences.skin.collectAsStateWithLifecycle(initialValue = HermesSkin.NOUS)
+            val botModeEnabledFlow = remember {
+                privacyPreferences.botModeEnabled.map<Boolean, Boolean?> { it }
+            }
+            val botModeEnabled by botModeEnabledFlow.collectAsStateWithLifecycle(initialValue = null)
+            var botModeOverride by remember { mutableStateOf<Boolean?>(null) }
+            LaunchedEffect(botModeEnabled) {
+                if (botModeOverride == botModeEnabled) botModeOverride = null
+            }
             val entryRequests by entryRequestStore.deliveries.collectAsStateWithLifecycle()
             val biometricAvailable = authenticationAvailable()
             val locked = biometricReentry == true && privacyGate.isLocked(enabled = true)
             ReportDrawnWhen {
-                biometricReentry != null && (locked || workspaceReady)
+                biometricReentry != null && botModeEnabled != null && (locked || workspaceReady)
             }
             when {
-                biometricReentry == null -> HermesTheme(skin) { }
+                biometricReentry == null || botModeEnabled == null -> HermesTheme(skin) { }
                 locked -> {
                     HermesTheme(skin) {
                         BiometricLockScreen(privacyGate.error, ::authenticate, ::useDeviceCredential)
@@ -108,6 +116,14 @@ class MainActivity : ComponentActivity() {
                     skin = skin,
                     onSkinChange = { selected ->
                         lifecycleScope.launch { privacyPreferences.setSkin(selected) }
+                    },
+                    botModeEnabled = botModeOverride ?: (botModeEnabled == true),
+                    onBotModeEnabledChange = { enabled ->
+                        botModeOverride = enabled
+                        lifecycleScope.launch {
+                            runCatching { privacyPreferences.setBotModeEnabled(enabled) }
+                                .onFailure { botModeOverride = null }
+                        }
                     },
                     entryDelivery = entryRequests.firstOrNull(),
                     onWorkspaceReady = { workspaceReady = true },

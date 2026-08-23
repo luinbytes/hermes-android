@@ -1,0 +1,10 @@
+{
+  "name": "coder",
+  "description": "Builds Android apps",
+  "soul": "# Coder\n\nBe precise.",
+  "model": {"provider": "nous", "default": "hermes-4"},
+  "skills": [{"name": "android", "enabled": true}, {"name": "legacy", "enabled": false}],
+  "toolsets": [{"name": "web", "label": "Web", "description": "Browse safely", "tool_count": 4, "enabled": true}],
+  "toolsets_pinned": true,
+  "mcp_servers": [{"name": "github", "enabled": true, "transport": "http"}]
+}

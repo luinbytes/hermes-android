@@ -84,6 +84,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 
 class HermesRestClient(
     private val client: OkHttpClient,
@@ -592,18 +593,19 @@ class HermesRestClient(
         ),
     )
 
-    suspend fun cronJobs(config: BackendConfig, token: String): List<CronJob> =
-        get(config, token, "/api/cron/jobs", ListSerializer(CronJob.serializer()))
+    suspend fun cronJobs(config: BackendConfig, token: String, profile: String? = null): List<CronJob> =
+        get(config, token, "/api/cron/jobs${profileQuery(profile)}", ListSerializer(CronJob.serializer()))
 
     suspend fun cronRuns(
         config: BackendConfig,
         token: String,
         jobId: String,
         limit: Int = 20,
+        profile: String? = null,
     ): CronRunPage = get(
         config,
         token,
-        "/api/cron/jobs/${encodePathSegment(jobId)}/runs?limit=${limit.coerceIn(1, 100)}",
+        "/api/cron/jobs/${encodePathSegment(jobId)}/runs?limit=${limit.coerceIn(1, 100)}${profileQuery(profile, '&')}",
         CronRunPage.serializer(),
     )
 
@@ -612,24 +614,25 @@ class HermesRestClient(
         token: String,
         jobId: String,
         enabled: Boolean,
+        profile: String? = null,
     ): CronJob = json.decodeFromJsonElement(
         CronJob.serializer(),
         request(
             config,
             token,
-            "/api/cron/jobs/${encodePathSegment(jobId)}/${if (enabled) "resume" else "pause"}",
+            "/api/cron/jobs/${encodePathSegment(jobId)}/${if (enabled) "resume" else "pause"}${profileQuery(profile)}",
             method = "POST",
             body = buildJsonObject { },
         ),
     )
 
-    suspend fun triggerCron(config: BackendConfig, token: String, jobId: String): CronJob =
+    suspend fun triggerCron(config: BackendConfig, token: String, jobId: String, profile: String? = null): CronJob =
         json.decodeFromJsonElement(
             CronJob.serializer(),
             request(
                 config,
                 token,
-                "/api/cron/jobs/${encodePathSegment(jobId)}/trigger",
+                "/api/cron/jobs/${encodePathSegment(jobId)}/trigger${profileQuery(profile)}",
                 method = "POST",
                 body = buildJsonObject { },
             ),
@@ -639,12 +642,13 @@ class HermesRestClient(
         config: BackendConfig,
         token: String,
         payload: CronJobCreatePayload,
+        profile: String? = null,
     ): CronJob = json.decodeFromJsonElement(
         CronJob.serializer(),
         request(
             config,
             token,
-            "/api/cron/jobs",
+            "/api/cron/jobs${profileQuery(profile)}",
             method = "POST",
             body = json.encodeToJsonElement(CronJobCreatePayload.serializer(), payload),
         ),
@@ -655,12 +659,13 @@ class HermesRestClient(
         token: String,
         jobId: String,
         updates: CronJobUpdates,
+        profile: String? = null,
     ): CronJob = json.decodeFromJsonElement(
         CronJob.serializer(),
         request(
             config,
             token,
-            "/api/cron/jobs/${encodePathSegment(jobId)}",
+            "/api/cron/jobs/${encodePathSegment(jobId)}${profileQuery(profile)}",
             method = "PUT",
             body = buildJsonObject {
                 put("updates", json.encodeToJsonElement(CronJobUpdates.serializer(), updates))
@@ -668,11 +673,11 @@ class HermesRestClient(
         ),
     )
 
-    suspend fun deleteCron(config: BackendConfig, token: String, jobId: String) {
+    suspend fun deleteCron(config: BackendConfig, token: String, jobId: String, profile: String? = null) {
         request(
             config,
             token,
-            "/api/cron/jobs/${encodePathSegment(jobId)}",
+            "/api/cron/jobs/${encodePathSegment(jobId)}${profileQuery(profile)}",
             method = "DELETE",
         )
     }
@@ -1320,6 +1325,31 @@ class HermesRestClient(
         }
     }
 
+    suspend fun publicImageDataUrl(value: String, maximumBytes: Int = 2_000_000): String = withContext(Dispatchers.IO) {
+        val url = value.toHttpUrlOrNull()
+            ?: throw IOException("Hermes returned an invalid image URL")
+        require(url.isHttps && url.username.isEmpty() && url.password.isEmpty()) {
+            "Hermes returned an unsafe image URL"
+        }
+        val request = Request.Builder().url(url).header("Accept", "image/*").build()
+        val noRedirectClient = client.newBuilder().followRedirects(false).followSslRedirects(false).build()
+        val call = noRedirectClient.newCall(request)
+        val cancellation = currentCoroutineContext()[Job]?.invokeOnCompletion { cause -> if (cause != null) call.cancel() }
+        try {
+            call.execute().use { response ->
+                if (!response.isSuccessful || response.isRedirect) throw IOException("Hermes image download failed (${response.code})")
+                val body = response.body ?: throw IOException("Hermes returned an empty image")
+                val mime = body.contentType()?.toString()?.substringBefore(';').orEmpty()
+                require(mime in setOf("image/png", "image/jpeg", "image/webp")) { "Hermes returned an unsupported image format" }
+                body.contentLength().takeIf { it >= 0 }?.let { require(it <= maximumBytes) { "Hermes image exceeds 2 MB" } }
+                val bytes = readBoundedBytes(body.byteStream(), maximumBytes)
+                "data:$mime;base64,${java.util.Base64.getEncoder().encodeToString(bytes)}"
+            }
+        } finally {
+            cancellation?.dispose()
+        }
+    }
+
     private fun updateStoredSession(config: BackendConfig, sentHeader: String, setCookieHeaders: List<String>) {
         if (config.authMode != AuthMode.DASHBOARD_SESSION || setCookieHeaders.isEmpty()) return
         val current = credentials?.get(config.id) ?: return
@@ -1330,6 +1360,9 @@ class HermesRestClient(
     private fun encodePathSegment(value: String): String =
         okhttp3.HttpUrl.Builder().scheme("https").host("placeholder.invalid").addPathSegment(value)
             .build().encodedPath.removePrefix("/")
+
+    private fun profileQuery(profile: String?, prefix: Char = '?'): String =
+        profile?.takeIf(String::isNotBlank)?.let { "$prefix${encodeQueryParameter("profile", it)}" }.orEmpty()
 
     private fun encodeQueryParameter(name: String, value: String): String =
         okhttp3.HttpUrl.Builder().scheme("https").host("placeholder.invalid").addQueryParameter(name, value)
@@ -1347,6 +1380,18 @@ class HermesRestClient(
             output.write(buffer, 0, read)
         }
         return output.toString(Charsets.UTF_8.name())
+    }
+
+    private fun readBoundedBytes(input: java.io.InputStream, maximumBytes: Int): ByteArray {
+        val output = ByteArrayOutputStream()
+        val buffer = ByteArray(16 * 1024)
+        while (true) {
+            val read = input.read(buffer)
+            if (read < 0) break
+            require(output.size() + read <= maximumBytes) { "Hermes image exceeds 2 MB" }
+            output.write(buffer, 0, read)
+        }
+        return output.toByteArray()
     }
 
     private companion object {

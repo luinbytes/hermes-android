@@ -319,8 +319,15 @@ class HermesViewModel @Inject constructor(
     )
 
     fun refresh() = viewModelScope.launch { repository.refreshSessions() }
+    fun consumeError(message: String) = repository.consumeError(message)
     fun searchSessions(query: String) = repository.searchSessions(query)
     fun openSession(session: StoredSession) = viewModelScope.launch { repository.openSession(session) }
+    fun openBotChat(profile: String, onOpened: (StoredSession?) -> Unit) = viewModelScope.launch {
+        val opened = repository.openCanonicalBotChat(profile)
+        onOpened(repository.state.value.activeStoredSession.takeIf { opened })
+    }
+    suspend fun botDirectChat(backendId: String, profile: String, prompt: String?) =
+        repository.botDirectChat(backendId, profile, prompt)
     fun newSession(profile: String? = null) = viewModelScope.launch { repository.newSession(profile) }
     suspend fun newSessionFromEntry(profile: String? = null): Boolean = repository.newSession(profile)
     fun send(text: String) = viewModelScope.launch { repository.send(text) }
@@ -363,7 +370,7 @@ class HermesViewModel @Inject constructor(
     fun branchActive(name: String) = viewModelScope.launch { repository.branchActive(name) }
     fun undoLastTurn() = viewModelScope.launch { repository.undoLastTurn() }
     fun retryLastMessage() = viewModelScope.launch { repository.retryLastMessage() }
-    fun resetActive() = viewModelScope.launch { repository.newSession(repository.state.value.activeStoredSession?.profile) }
+    fun resetActive() = viewModelScope.launch { repository.resetActive() }
     fun compressActive(focusTopic: String) = viewModelScope.launch { repository.compressActive(focusTopic) }
     fun refreshSkills() = viewModelScope.launch { repository.refreshSkills() }
     fun toggleSkill(name: String, enabled: Boolean) = viewModelScope.launch { repository.toggleSkill(name, enabled) }
@@ -374,22 +381,57 @@ class HermesViewModel @Inject constructor(
     fun uninstallSkill(name: String) = viewModelScope.launch { repository.uninstallSkill(name) }
     fun updateSkills() = viewModelScope.launch { repository.updateSkills() }
     fun refreshCron() = viewModelScope.launch { repository.refreshCronJobs() }
+    fun refreshBotRoutines(owner: String) = viewModelScope.launch { repository.refreshBotRoutines(owner) }
     fun refreshCronRuns(jobId: String) = viewModelScope.launch { repository.refreshCronRuns(jobId) }
     fun setCronEnabled(jobId: String, enabled: Boolean) = viewModelScope.launch { repository.setCronEnabled(jobId, enabled) }
     fun triggerCron(jobId: String) = viewModelScope.launch { repository.triggerCron(jobId) }
     fun createCron(name: String, prompt: String, schedule: String, deliver: String) = viewModelScope.launch {
         repository.createCron(name, prompt, schedule, deliver)
     }
+    fun createBotRoutine(owner: String, name: String, prompt: String, schedule: String, deliver: String) = viewModelScope.launch {
+        repository.createBotRoutine(owner, name, prompt, schedule, deliver)
+    }
     fun updateCron(jobId: String, name: String, prompt: String, schedule: String, deliver: String) = viewModelScope.launch {
         repository.updateCron(jobId, name, prompt, schedule, deliver)
     }
     fun deleteCron(jobId: String) = viewModelScope.launch { repository.deleteCron(jobId) }
     fun refreshProfiles() = viewModelScope.launch { repository.refreshProfiles() }
+    fun refreshBotRoster() = viewModelScope.launch { repository.refreshProfiles(showLoading = false) }
+    fun setBotHidden(backendId: String, profile: String, hidden: Boolean) = viewModelScope.launch {
+        repository.setBotHidden(profile, hidden, backendId)
+    }
+    suspend fun createBotGroup(name: String, members: List<com.nousresearch.hermes.protocol.BotGroupMember>) =
+        repository.createBotGroup(name, members)
+    suspend fun botGroupCandidates() = repository.botGroupCandidates()
+    suspend fun updateBotGroup(room: com.nousresearch.hermes.protocol.BotGroupRoom) = repository.updateBotGroup(room)
+    suspend fun disbandBotGroup(roomId: String) = repository.disbandBotGroup(roomId)
+    suspend fun sendBotGroupMessage(
+        roomId: String,
+        text: String,
+        thread: String,
+        attachments: List<com.nousresearch.hermes.protocol.BotGroupAttachment>,
+    ) = repository.sendBotGroupMessage(roomId, text, thread, attachments)
+    fun acknowledgeBotGroup(roomId: String) = repository.acknowledgeBotGroup(roomId)
+    suspend fun answerBotGroupBlocking(requestId: String, answers: Map<String, List<String>>) =
+        repository.answerBotGroupBlocking(requestId, answers)
+    suspend fun describeBotAgent(profile: String) = repository.describeBotAgent(profile)
+    suspend fun createBotAgent(
+        draft: com.nousresearch.hermes.data.BotAgentDraft,
+        backendId: String,
+        cloneFrom: String?,
+        cloneAll: Boolean,
+        noSkills: Boolean,
+        mirrorCredentials: Boolean,
+    ) = repository.createBotAgent(draft, backendId, cloneFrom, cloneAll, noSkills, mirrorCredentials)
+    suspend fun configureBotAgent(draft: com.nousresearch.hermes.data.BotAgentDraft) = repository.configureBotAgent(draft)
+    suspend fun profileAvatar(profile: String) = repository.profileAvatar(profile)
+    suspend fun botProfileAvatar(backendId: String, profile: String) = repository.botProfileAvatar(backendId, profile)
+    suspend fun setProfileAvatar(profile: String, dataUrl: String?) = repository.setProfileAvatar(profile, dataUrl)
+    suspend fun generateProfileAvatar(profile: String, prompt: String) = repository.generateProfileAvatar(profile, prompt)
+    suspend fun profilePetGallery(profile: String) = repository.profilePetGallery(profile)
+    suspend fun adoptProfilePet(profile: String, slug: String) = repository.adoptProfilePet(profile, slug)
     suspend fun entryAuthoritySnapshot(includeCronJobs: Boolean) =
         repository.entryAuthoritySnapshot(includeCronJobs)
-    fun createProfile(name: String, cloneFrom: String, cloneAll: Boolean, noSkills: Boolean) = viewModelScope.launch {
-        repository.createProfile(name, cloneFrom, cloneAll, noSkills)
-    }
     fun renameProfile(name: String, newName: String) = viewModelScope.launch { repository.renameProfile(name, newName) }
     fun setActiveProfile(name: String) = viewModelScope.launch { repository.setActiveProfile(name) }
     fun deleteProfile(name: String) = viewModelScope.launch { repository.deleteProfile(name) }

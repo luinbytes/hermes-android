@@ -1,0 +1,25 @@
+{
+  "clarify": {
+    "session_id": "live",
+    "pending_clarify": {
+      "request_id": "clarify-1",
+      "questions": [
+        {
+          "qid": "region",
+          "question": "Which regions?",
+          "choices": ["EU", "US"],
+          "multi_select": true
+        }
+      ]
+    }
+  },
+  "approval": {
+    "session_id": "live",
+    "pending_approval": {
+      "request_id": "approve-1",
+      "command": "deploy",
+      "description": "Deploy now?",
+      "choices": ["once", "deny"]
+    }
+  }
+}

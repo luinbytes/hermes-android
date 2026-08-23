@@ -5,13 +5,23 @@ import java.net.URI
 
 object TransportPolicy {
     fun validate(config: BackendConfig): Result<URI> = runCatching {
-        val uri = URI(config.baseUrl.trim().trimEnd('/'))
-        require(uri.scheme == "https" || uri.scheme == "http") {
+        val requested = URI(config.baseUrl.trim().trimEnd('/'))
+        require(requested.scheme == "https" || requested.scheme == "http") {
             "Hermes URL must use HTTPS or HTTP"
         }
-        require(!uri.host.isNullOrBlank()) { "Hermes URL must include a host" }
-        require(uri.userInfo == null) { "Credentials must not be embedded in the URL" }
-        require(uri.fragment == null) { "Hermes URL must not include a fragment" }
+        require(!requested.host.isNullOrBlank()) { "Hermes URL must include a host" }
+        require(requested.userInfo == null) { "Credentials must not be embedded in the URL" }
+        require(requested.fragment == null) { "Hermes URL must not include a fragment" }
+
+        val uri = if (
+            requested.scheme == "https" &&
+            config.allowInsecurePrivateNetwork &&
+            isPrivateLiteral(requested.host)
+        ) {
+            URI("http:${requested.rawSchemeSpecificPart}")
+        } else {
+            requested
+        }
 
         if (uri.scheme == "http") {
             require(config.allowInsecurePrivateNetwork) {
@@ -37,4 +47,3 @@ object TransportPolicy {
             (octets[0] == 100 && octets[1] in 64..127)
     }
 }
-

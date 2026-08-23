@@ -34,11 +34,15 @@ class PrivacyPreferencesTest {
         val preferences = PrivacyPreferences(store)
 
         assertFalse(preferences.secureScreen.first())
+        assertTrue(preferences.botModeEnabled.first())
         assertEquals(HermesSkin.NOUS, preferences.skin.first())
         preferences.setSecureScreen(true)
         assertTrue(preferences.secureScreen.first())
         preferences.setSecureScreen(false)
         assertFalse(preferences.secureScreen.first())
+        preferences.setBotModeEnabled(false)
+        assertFalse(preferences.botModeEnabled.first())
+        assertFalse(PrivacyPreferences(store).botModeEnabled.first())
         preferences.setSkin(HermesSkin.EMBER)
         assertEquals(HermesSkin.EMBER, preferences.skin.first())
         assertEquals(ModelPreset(), preferences.modelPreset("nous", "hermes-4"))
@@ -88,5 +92,6 @@ class PrivacyPreferencesTest {
         }
 
         assertTrue(PrivacyPreferences(failingStore).biometricReentry.first())
+        assertFalse(PrivacyPreferences(failingStore).botModeEnabled.first())
     }
 }

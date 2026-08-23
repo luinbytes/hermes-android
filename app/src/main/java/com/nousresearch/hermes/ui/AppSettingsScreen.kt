@@ -54,6 +54,8 @@ internal fun AppSettingsScreen(
     onBiometricReentryChange: (Boolean) -> Unit,
     skin: HermesSkin,
     onSkinChange: (HermesSkin) -> Unit,
+    botModeEnabled: Boolean,
+    onBotModeEnabledChange: (Boolean) -> Unit,
     onBack: (() -> Unit)?,
     modifier: Modifier = Modifier,
 ) {
@@ -98,6 +100,27 @@ internal fun AppSettingsScreen(
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             item { AppearancePicker(skin, onSkinChange) }
+            item {
+                Surface(color = MaterialTheme.colorScheme.surfaceVariant, shape = MaterialTheme.shapes.medium) {
+                    Row(
+                        Modifier.fillMaxWidth().padding(14.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text("BOT MODE", style = MaterialTheme.typography.titleMedium)
+                            Text(
+                                "Open Chats as a messaging roster of persistent Hermes agents. Sessions remain available beside Bots.",
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                        Switch(
+                            checked = botModeEnabled,
+                            onCheckedChange = onBotModeEnabledChange,
+                            modifier = Modifier.semantics { contentDescription = "Bot Mode" },
+                        )
+                    }
+                }
+            }
             item {
                 Surface(color = MaterialTheme.colorScheme.surfaceVariant, shape = MaterialTheme.shapes.medium) {
                     Row(

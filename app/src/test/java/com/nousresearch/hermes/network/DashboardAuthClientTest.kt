@@ -158,6 +158,22 @@ class DashboardAuthClientTest {
     }
 
     @Test
+    fun `private-network HTTP selection reaches a cleartext dashboard from https input`() = runTest {
+        MockWebServer().use { server ->
+            server.enqueue(passwordProviderResponse("basic"))
+            server.start()
+            val config = config(server).copy(
+                baseUrl = server.url("/").newBuilder().scheme("https").build().toString().trimEnd('/'),
+            )
+
+            val providers = DashboardAuthClient(OkHttpClient(), json).discoverPasswordProviders(config)
+
+            assertEquals("basic", providers.single().name)
+            assertEquals("/api/auth/providers", server.takeRequest().path)
+        }
+    }
+
+    @Test
     fun `explicit provider is validated against fresh discovery and submitted exactly`() = runTest {
         MockWebServer().use { server ->
             server.enqueue(

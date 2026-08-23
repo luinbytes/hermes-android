@@ -2,6 +2,10 @@ package com.nousresearch.hermes.ui
 
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.net.Uri
+import android.util.Base64
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -13,6 +17,7 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -32,6 +37,7 @@ import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Schedule
 import androidx.compose.material.icons.outlined.Star
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
@@ -63,11 +69,21 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.nousresearch.hermes.data.BackendConfig
+import com.nousresearch.hermes.data.BotAgentDraft
+import com.nousresearch.hermes.data.BotSchedule
+import com.nousresearch.hermes.data.BotScheduleFrequency
 import com.nousresearch.hermes.data.HermesState
 import com.nousresearch.hermes.data.ProfileIdentityDraft
+import com.nousresearch.hermes.data.botRoutineName
+import com.nousresearch.hermes.data.botRoutineOwner
+import com.nousresearch.hermes.data.botRoutineTitle
 import com.nousresearch.hermes.network.DashboardAuthProvider
 import com.nousresearch.hermes.protocol.CronJob
 import com.nousresearch.hermes.protocol.ProfileInfo
+import com.nousresearch.hermes.protocol.ProfileAsset
+import com.nousresearch.hermes.protocol.ProfileDescription
+import com.nousresearch.hermes.protocol.PetGallery
+import com.nousresearch.hermes.protocol.HermesRpcException
 import com.nousresearch.hermes.protocol.SkillInfo
 import com.nousresearch.hermes.protocol.SkillHubResult
 import com.nousresearch.hermes.protocol.StoredSession
@@ -242,13 +258,13 @@ private fun BackendConnectionDialog(
                 )
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
-                        Text("Allow private-network HTTP")
+                        Text("Use private-network HTTP")
                         Text("Only literal LAN, loopback, or Tailscale IPs.", style = MaterialTheme.typography.bodySmall)
                     }
                     Switch(
                         checked = allowPrivate,
                         onCheckedChange = { allowPrivate = it; clearProviderSelection() },
-                        modifier = Modifier.semantics { contentDescription = "Allow private-network HTTP" },
+                        modifier = Modifier.semantics { contentDescription = "Use private-network HTTP" },
                     )
                 }
                 if (passwordProviders.size > 1 && providerSource == providerKey) {
@@ -591,6 +607,7 @@ internal fun CronScreen(
     editorJob?.let { job ->
         CronEditorDialog(
             job = job,
+            owner = job.botRoutineOwner(),
             onDismiss = { editorJobId = null },
             onSave = { name, prompt, schedule, deliver ->
                 editorJobId = null
@@ -657,19 +674,30 @@ internal fun ProfilesScreen(
     state: HermesState,
     onRefresh: () -> Unit,
     onStartSession: (String) -> Unit,
-    onCreate: (String, String, Boolean, Boolean) -> Unit,
     onRename: (String, String) -> Unit,
     onSetActive: (String) -> Unit,
     onDelete: (String) -> Unit,
     onLoadIdentity: suspend (String) -> ProfileIdentityDraft,
     onSaveSoul: suspend (String, String) -> Unit,
     onSaveModel: suspend (String, String, String) -> Unit,
+    onDescribeAgent: suspend (String) -> ProfileDescription,
+    onCreateAgent: suspend (BotAgentDraft, String, String?, Boolean, Boolean, Boolean) -> Boolean,
+    onConfigureAgent: suspend (BotAgentDraft) -> Unit,
+    onLoadAvatar: suspend (String) -> ProfileAsset,
+    onSetAvatar: suspend (String, String?) -> Unit,
+    onGenerateAvatar: suspend (String, String) -> String,
+    onLoadPets: suspend (String) -> PetGallery,
+    onAdoptPet: suspend (String, String) -> String,
+    onOpenAgentChat: (String, String) -> Unit,
+    initialEditProfile: String? = null,
+    onEditorConsumed: () -> Unit = {},
     onBack: (() -> Unit)?,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var creating by rememberSaveable { mutableStateOf(false) }
+    var cloneProfileName by rememberSaveable { mutableStateOf<String?>(null) }
     var renameProfileName by remember { mutableStateOf<String?>(null) }
     var deleteProfileName by remember { mutableStateOf<String?>(null) }
     var identityName by remember { mutableStateOf<String?>(null) }
@@ -684,9 +712,57 @@ internal fun ProfilesScreen(
     var modelDraft by remember { mutableStateOf("") }
     var identityError by remember { mutableStateOf<String?>(null) }
     var identityNotice by remember { mutableStateOf<String?>(null) }
+    var descriptionDraft by remember { mutableStateOf("") }
+    var originalDescription by remember { mutableStateOf("") }
+    var skills by remember { mutableStateOf(emptyList<com.nousresearch.hermes.protocol.ProfileCapability>()) }
+    var toolsets by remember { mutableStateOf(emptyList<com.nousresearch.hermes.protocol.ProfileCapability>()) }
+    var mcpServers by remember { mutableStateOf(emptyList<com.nousresearch.hermes.protocol.ProfileCapability>()) }
+    var disabledSkills by remember { mutableStateOf(emptySet<String>()) }
+    var originalDisabledSkills by remember { mutableStateOf(emptySet<String>()) }
+    var enabledToolsets by remember { mutableStateOf(emptySet<String>()) }
+    var originalEnabledToolsets by remember { mutableStateOf(emptySet<String>()) }
+    var enabledMcpServers by remember { mutableStateOf(emptySet<String>()) }
+    var originalEnabledMcpServers by remember { mutableStateOf(emptySet<String>()) }
+    var avatarData by remember { mutableStateOf<String?>(null) }
+    var avatarPrompt by remember { mutableStateOf("") }
+    var limitedIdentityEditor by remember { mutableStateOf(false) }
+    var avatarFeaturesAvailable by remember { mutableStateOf(true) }
+    var pets by remember { mutableStateOf<PetGallery?>(null) }
+    var petQuery by remember { mutableStateOf("") }
     var confirmDiscardIdentity by rememberSaveable { mutableStateOf(false) }
     val renameProfile = state.profiles.firstOrNull { it.name == renameProfileName }
     val deleteProfile = state.profiles.firstOrNull { it.name == deleteProfileName }
+    LaunchedEffect(initialEditProfile, state.profiles) {
+        val requested = initialEditProfile ?: return@LaunchedEffect
+        if (state.profiles.any { it.name == requested }) {
+            identityName = requested
+            identityLoaded = false
+            identityError = null
+            identityNotice = null
+            onEditorConsumed()
+        }
+    }
+    val avatarPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
+        val name = identityName
+        if (uri != null && name != null) {
+            identityLoading = true
+            identityError = null
+            scope.launch {
+                try {
+                    val data = profileAvatarDataUrl(context, uri)
+                    onSetAvatar(name, data)
+                    avatarData = data
+                    identityNotice = "Avatar saved"
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (error: Throwable) {
+                    identityError = error.message ?: "Hermes could not save that avatar"
+                } finally {
+                    identityLoading = false
+                }
+            }
+        }
+    }
     LaunchedEffect(Unit) { onRefresh() }
     LaunchedEffect(identityName, identityLoaded) {
         val name = identityName ?: return@LaunchedEffect
@@ -695,6 +771,32 @@ internal fun ProfilesScreen(
         identityError = null
         try {
             val identity = onLoadIdentity(name)
+            var limitedEditor = false
+            val agent = try {
+                onDescribeAgent(name)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                if (error !is HermesRpcException || error.rpcCode != -32601) throw error
+                limitedEditor = true
+                val profile = state.profiles.first { it.name == name }
+                ProfileDescription(
+                    name = name,
+                    description = profile.description,
+                    soul = identity.soul,
+                    model = com.nousresearch.hermes.protocol.ProfileModelPin(identity.provider, identity.model),
+                )
+            }
+            var avatarsAvailable = true
+            val avatar = try {
+                onLoadAvatar(name)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                if (error !is HermesRpcException || error.rpcCode != -32601) throw error
+                avatarsAvailable = false
+                ProfileAsset()
+            }
             if (identityName == name) {
                 originalSoul = identity.soul
                 soulDraft = identity.soul
@@ -703,6 +805,25 @@ internal fun ProfilesScreen(
                 providerDraft = identity.provider
                 originalModel = identity.model
                 modelDraft = identity.model
+                descriptionDraft = agent.description
+                originalDescription = agent.description
+                skills = agent.skills
+                toolsets = agent.toolsets
+                mcpServers = agent.mcpServers
+                disabledSkills = agent.skills.filterNot { it.enabled }.mapTo(mutableSetOf()) { it.name }
+                originalDisabledSkills = disabledSkills
+                enabledToolsets = agent.toolsets.filter { it.enabled }.mapTo(mutableSetOf()) { it.name }
+                originalEnabledToolsets = enabledToolsets
+                enabledMcpServers = agent.mcpServers.filter { it.enabled }.mapTo(mutableSetOf()) { it.name }
+                originalEnabledMcpServers = enabledMcpServers
+                avatarData = avatar.data
+                if (limitedEditor) {
+                    identityNotice = "This Hermes backend supports basic identity editing only; update it for capabilities and shared avatars."
+                } else if (!avatarsAvailable) {
+                    identityNotice = "Shared avatars require a newer Hermes gateway; the deterministic avatar remains active."
+                }
+                limitedIdentityEditor = limitedEditor
+                avatarFeaturesAvailable = avatarsAvailable
                 identityLoaded = true
             }
         } catch (cancelled: CancellationException) {
@@ -727,11 +848,32 @@ internal fun ProfilesScreen(
         modelDraft = ""
         identityError = null
         identityNotice = null
+        descriptionDraft = ""
+        originalDescription = ""
+        skills = emptyList()
+        toolsets = emptyList()
+        mcpServers = emptyList()
+        disabledSkills = emptySet()
+        originalDisabledSkills = emptySet()
+        enabledToolsets = emptySet()
+        originalEnabledToolsets = emptySet()
+        enabledMcpServers = emptySet()
+        originalEnabledMcpServers = emptySet()
+        avatarData = null
+        avatarPrompt = ""
+        limitedIdentityEditor = false
+        avatarFeaturesAvailable = true
+        pets = null
+        petQuery = ""
         confirmDiscardIdentity = false
     }
 
     fun requestCloseIdentity() {
-        if (profileIdentityDirty(originalSoul, soulDraft, originalProvider, providerDraft, originalModel, modelDraft)) {
+        if (
+            profileIdentityDirty(originalSoul, soulDraft, originalProvider, providerDraft, originalModel, modelDraft) ||
+            descriptionDraft != originalDescription || disabledSkills != originalDisabledSkills ||
+            enabledToolsets != originalEnabledToolsets || enabledMcpServers != originalEnabledMcpServers
+        ) {
             confirmDiscardIdentity = true
         } else {
             closeIdentity()
@@ -775,6 +917,10 @@ internal fun ProfilesScreen(
                         },
                         onSetActive = { onSetActive(profile.name) },
                         onDelete = { deleteProfileName = profile.name },
+                        onDuplicate = {
+                            cloneProfileName = profile.name
+                            creating = true
+                        },
                         modifier = Modifier.padding(horizontal = 12.dp),
                     )
                 }
@@ -783,11 +929,17 @@ internal fun ProfilesScreen(
     }
 
     if (creating) {
-        ProfileCreateDialog(
-            onDismiss = { creating = false },
-            onCreate = { name, cloneFrom, cloneAll, noSkills ->
+        BotAgentCreateDialog(
+            profiles = state.profiles,
+            backends = state.savedBackends,
+            activeBackendId = state.backend?.id.orEmpty(),
+            initialClone = cloneProfileName,
+            onDismiss = { creating = false; cloneProfileName = null },
+            onCreate = onCreateAgent,
+            onCreated = { name, backendId ->
                 creating = false
-                onCreate(name, cloneFrom, cloneAll, noSkills)
+                cloneProfileName = null
+                onOpenAgentChat(name, backendId)
             },
         )
     }
@@ -825,7 +977,10 @@ internal fun ProfilesScreen(
                 if (identityLoading && !identityLoaded) {
                     CircularProgressIndicator()
                 } else {
-                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Column(
+                        Modifier.heightIn(max = 620.dp).verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
                         Text(
                             "Stored on ${state.backend?.label.orEmpty()} for profile $name.",
                             style = MaterialTheme.typography.bodySmall,
@@ -844,6 +999,127 @@ internal fun ProfilesScreen(
                                     ) { Text("Copy command") }
                                 }
                             }
+                        }
+                        OutlinedTextField(
+                            value = descriptionDraft,
+                            onValueChange = { descriptionDraft = it.take(500); identityNotice = null },
+                            label = { Text("Role / description") },
+                            minLines = 2,
+                            maxLines = 4,
+                            enabled = !limitedIdentityEditor,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        Text(
+                            if (avatarData != null) "CUSTOM AVATAR SET" else "DETERMINISTIC AGENT AVATAR",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedButton(onClick = { avatarPicker.launch("image/*") }, enabled = !identityLoading && avatarFeaturesAvailable) {
+                                Text("Upload")
+                            }
+                            if (avatarData != null) {
+                                OutlinedButton(
+                                    onClick = {
+                                        identityLoading = true
+                                        scope.launch {
+                                            try {
+                                                onSetAvatar(name, null)
+                                                avatarData = null
+                                                identityNotice = "Avatar removed"
+                                            } catch (cancelled: CancellationException) {
+                                                throw cancelled
+                                            } catch (error: Throwable) {
+                                                identityError = error.message ?: "Hermes could not remove the avatar"
+                                            } finally {
+                                                identityLoading = false
+                                            }
+                                        }
+                                    },
+                                    enabled = !identityLoading,
+                                ) { Text("Remove") }
+                            }
+                        }
+                        OutlinedTextField(
+                            value = avatarPrompt,
+                            onValueChange = { avatarPrompt = it.take(500) },
+                            label = { Text("Generate avatar") },
+                            supportingText = { Text("Uses the image provider configured on this Hermes backend.") },
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        OutlinedButton(
+                            onClick = {
+                                identityLoading = true
+                                identityError = null
+                                scope.launch {
+                                    try {
+                                        avatarData = onGenerateAvatar(name, avatarPrompt)
+                                        identityNotice = "Generated avatar saved"
+                                    } catch (cancelled: CancellationException) {
+                                        throw cancelled
+                                    } catch (error: Throwable) {
+                                        identityError = error.message ?: "Hermes could not generate an avatar"
+                                    } finally {
+                                        identityLoading = false
+                                    }
+                                }
+                            },
+                            enabled = avatarPrompt.isNotBlank() && !identityLoading && avatarFeaturesAvailable,
+                        ) { Text("Generate") }
+                        OutlinedButton(
+                            onClick = {
+                                identityLoading = true
+                                identityError = null
+                                scope.launch {
+                                    try {
+                                        pets = onLoadPets(name)
+                                        if (pets?.pets.isNullOrEmpty()) identityNotice = "No pet avatars are available on this backend"
+                                    } catch (cancelled: CancellationException) {
+                                        throw cancelled
+                                    } catch (error: Throwable) {
+                                        identityError = error.message ?: "Hermes could not load pet avatars"
+                                    } finally {
+                                        identityLoading = false
+                                    }
+                                }
+                            },
+                            enabled = !identityLoading && avatarFeaturesAvailable,
+                        ) { Text(if (pets == null) "Choose pet" else "Refresh pets") }
+                        pets?.takeIf { it.pets.isNotEmpty() }?.let { gallery ->
+                            OutlinedTextField(
+                                value = petQuery,
+                                onValueChange = { petQuery = it.take(100) },
+                                label = { Text("Search ${gallery.pets.size} pets") },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                            gallery.pets.asSequence()
+                                .filter { petQuery.isBlank() || it.displayName.contains(petQuery, true) || it.slug.contains(petQuery, true) }
+                                .sortedWith(compareByDescending<com.nousresearch.hermes.protocol.PetGalleryEntry> { it.installed }.thenByDescending { it.curated })
+                                .take(30)
+                                .forEach { pet ->
+                                    TextButton(
+                                        onClick = {
+                                            identityLoading = true
+                                            scope.launch {
+                                                try {
+                                                    avatarData = onAdoptPet(name, pet.slug)
+                                                    identityNotice = "${pet.displayName} is now this agent's avatar"
+                                                } catch (cancelled: CancellationException) {
+                                                    throw cancelled
+                                                } catch (error: Throwable) {
+                                                    identityError = error.message ?: "Hermes could not adopt that pet"
+                                                } finally {
+                                                    identityLoading = false
+                                                }
+                                            }
+                                        },
+                                        enabled = !identityLoading,
+                                        modifier = Modifier.fillMaxWidth(),
+                                    ) {
+                                        Text(pet.displayName + if (pet.installed) " · installed" else "")
+                                    }
+                                }
                         }
                         OutlinedTextField(
                             value = soulDraft,
@@ -871,6 +1147,34 @@ internal fun ProfilesScreen(
                                 modifier = Modifier.weight(1f),
                             )
                         }
+                        AgentCapabilityList(
+                            title = "SKILLS",
+                            capabilities = skills,
+                            enabled = { it.name !in disabledSkills },
+                            onToggle = { capability, checked ->
+                                disabledSkills = if (checked) disabledSkills - capability.name else disabledSkills + capability.name
+                            },
+                        )
+                        AgentCapabilityList(
+                            title = "TOOLS",
+                            capabilities = toolsets,
+                            enabled = { it.name in enabledToolsets },
+                            onToggle = { capability, checked ->
+                                if (!checked && enabledToolsets == setOf(capability.name)) {
+                                    identityError = "Hermes requires at least one toolset; an empty selection means use all defaults."
+                                } else {
+                                    enabledToolsets = if (checked) enabledToolsets + capability.name else enabledToolsets - capability.name
+                                }
+                            },
+                        )
+                        AgentCapabilityList(
+                            title = "MCP SERVERS",
+                            capabilities = mcpServers,
+                            enabled = { it.name in enabledMcpServers },
+                            onToggle = { capability, checked ->
+                                enabledMcpServers = if (checked) enabledMcpServers + capability.name else enabledMcpServers - capability.name
+                            },
+                        )
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             Button(
                                 onClick = {
@@ -878,44 +1182,51 @@ internal fun ProfilesScreen(
                                     identityError = null
                                     scope.launch {
                                         try {
-                                            onSaveSoul(name, soulDraft)
+                                            if (limitedIdentityEditor) {
+                                                onSaveSoul(name, soulDraft)
+                                                if (providerDraft.isNotBlank() && modelDraft.isNotBlank()) {
+                                                    onSaveModel(name, providerDraft, modelDraft)
+                                                }
+                                            } else {
+                                                onConfigureAgent(
+                                                    BotAgentDraft(
+                                                        name = name,
+                                                        description = descriptionDraft,
+                                                        soul = soulDraft,
+                                                        provider = providerDraft,
+                                                        model = modelDraft,
+                                                        disabledSkills = disabledSkills,
+                                                        enabledToolsets = enabledToolsets,
+                                                        enabledMcpServers = enabledMcpServers,
+                                                    ),
+                                                )
+                                            }
                                             originalSoul = soulDraft
-                                            identityNotice = "SOUL.md saved"
-                                        } catch (cancelled: CancellationException) {
-                                            throw cancelled
-                                        } catch (error: Throwable) {
-                                            identityError = error.message ?: "Hermes could not save SOUL.md"
-                                        } finally {
-                                            identityLoading = false
-                                        }
-                                    }
-                                },
-                                enabled = identityLoaded && !identityLoading && soulDraft != originalSoul,
-                            ) { Text("Save SOUL") }
-                            Button(
-                                onClick = {
-                                    identityLoading = true
-                                    identityError = null
-                                    scope.launch {
-                                        try {
-                                            onSaveModel(name, providerDraft, modelDraft)
+                                            originalDescription = descriptionDraft.trim()
                                             originalProvider = providerDraft.trim()
                                             originalModel = modelDraft.trim()
-                                            providerDraft = originalProvider
-                                            modelDraft = originalModel
-                                            identityNotice = "Profile model saved"
+                                            originalDisabledSkills = disabledSkills
+                                            originalEnabledToolsets = enabledToolsets
+                                            originalEnabledMcpServers = enabledMcpServers
+                                            identityNotice = "Agent configuration saved"
                                         } catch (cancelled: CancellationException) {
                                             throw cancelled
                                         } catch (error: Throwable) {
-                                            identityError = error.message ?: "Hermes could not save the profile model"
+                                            identityError = error.message ?: "Hermes could not save the agent configuration"
                                         } finally {
                                             identityLoading = false
                                         }
                                     }
                                 },
-                                enabled = identityLoaded && !identityLoading && providerDraft.isNotBlank() && modelDraft.isNotBlank() &&
-                                    (providerDraft != originalProvider || modelDraft != originalModel),
-                            ) { Text("Save model") }
+                                enabled = identityLoaded && !identityLoading &&
+                                    (providerDraft.isBlank() == modelDraft.isBlank()) &&
+                                    (
+                                        soulDraft != originalSoul || descriptionDraft != originalDescription ||
+                                            providerDraft != originalProvider || modelDraft != originalModel ||
+                                            disabledSkills != originalDisabledSkills || enabledToolsets != originalEnabledToolsets ||
+                                            enabledMcpServers != originalEnabledMcpServers
+                                    ),
+                            ) { Text("Save agent") }
                         }
                         identityNotice?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary) }
                         identityError?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
@@ -946,6 +1257,84 @@ internal fun profileIdentityDirty(
 ): Boolean = soul != originalSoul || provider != originalProvider || model != originalModel
 
 @Composable
+private fun AgentCapabilityList(
+    title: String,
+    capabilities: List<com.nousresearch.hermes.protocol.ProfileCapability>,
+    enabled: (com.nousresearch.hermes.protocol.ProfileCapability) -> Boolean,
+    onToggle: (com.nousresearch.hermes.protocol.ProfileCapability, Boolean) -> Unit,
+) {
+    if (capabilities.isEmpty()) return
+    Text(title, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+    capabilities.forEach { capability ->
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(capability.label.ifBlank { capability.name }, style = MaterialTheme.typography.bodyMedium)
+                capability.description.takeIf(String::isNotBlank)?.let {
+                    Text(it, style = MaterialTheme.typography.bodySmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                }
+            }
+            Switch(
+                checked = enabled(capability),
+                onCheckedChange = { onToggle(capability, it) },
+                modifier = Modifier.semantics {
+                    contentDescription = "Enable ${capability.label.ifBlank { capability.name }}"
+                },
+            )
+        }
+    }
+}
+
+internal fun profileAvatarDataUrl(
+    context: android.content.Context,
+    uri: Uri,
+    targetDataCharacters: Int? = null,
+): String {
+    val mime = context.contentResolver.getType(uri)?.lowercase()
+    require(mime in setOf("image/png", "image/jpeg", "image/webp")) { "Choose a PNG, JPEG, or WebP image" }
+    val bytes = context.contentResolver.openInputStream(uri)?.use { input ->
+        val output = java.io.ByteArrayOutputStream()
+        val buffer = ByteArray(8_192)
+        while (output.size() <= 2_000_000) {
+            val count = input.read(buffer, 0, minOf(buffer.size, 2_000_001 - output.size()))
+            if (count <= 0) break
+            output.write(buffer, 0, count)
+        }
+        output.toByteArray()
+    } ?: throw IllegalArgumentException("Android could not read that image")
+    require(bytes.size <= 2_000_000) { "Avatar images must be 2 MB or smaller" }
+    if (targetDataCharacters == null) {
+        return "data:$mime;base64,${Base64.encodeToString(bytes, Base64.NO_WRAP)}"
+    }
+    var bitmap = android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+        ?: throw IllegalArgumentException("Android could not decode that image")
+    val longest = maxOf(bitmap.width, bitmap.height)
+    if (longest > 256) {
+        val scale = 256f / longest
+        val scaled = android.graphics.Bitmap.createScaledBitmap(
+            bitmap,
+            maxOf(1, (bitmap.width * scale).toInt()),
+            maxOf(1, (bitmap.height * scale).toInt()),
+            true,
+        )
+        bitmap.recycle()
+        bitmap = scaled
+    }
+    var quality = 88
+    var encoded: String
+    do {
+        val compressed = java.io.ByteArrayOutputStream().use { output ->
+            check(bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, quality, output))
+            output.toByteArray()
+        }
+        encoded = "data:image/jpeg;base64,${Base64.encodeToString(compressed, Base64.NO_WRAP)}"
+        quality -= 10
+    } while (encoded.length > targetDataCharacters && quality >= 38)
+    bitmap.recycle()
+    require(encoded.length <= targetDataCharacters) { "That picture could not be reduced to the group sync limit" }
+    return encoded
+}
+
+@Composable
 private fun ProfileRow(
     profile: ProfileInfo,
     isActive: Boolean,
@@ -955,6 +1344,7 @@ private fun ProfileRow(
     onEditIdentity: () -> Unit,
     onSetActive: () -> Unit,
     onDelete: () -> Unit,
+    onDuplicate: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val protected = profile.isDefault || isCurrent
@@ -972,6 +1362,7 @@ private fun ProfileRow(
                 }
                 IconButton(onClick = onStartSession) { Icon(Icons.Outlined.PlayArrow, "Start session in ${profile.name}") }
                 IconButton(onClick = onEditIdentity) { Icon(Icons.Outlined.Description, "Edit identity for ${profile.name}") }
+                IconButton(onClick = onDuplicate) { Icon(Icons.Outlined.Add, "Duplicate ${profile.name}") }
                 if (!profile.isDefault) IconButton(onClick = onRename) { Icon(Icons.Outlined.Edit, "Rename ${profile.name}") }
                 if (!protected) IconButton(onClick = onDelete) { Icon(Icons.Outlined.Delete, "Delete ${profile.name}") }
             }
@@ -994,47 +1385,143 @@ private fun ProfileRow(
 }
 
 @Composable
-private fun ProfileCreateDialog(
+internal fun BotAgentCreateDialog(
+    profiles: List<ProfileInfo>,
+    backends: List<BackendConfig>,
+    activeBackendId: String,
+    initialClone: String?,
     onDismiss: () -> Unit,
-    onCreate: (String, String, Boolean, Boolean) -> Unit,
+    onCreate: suspend (BotAgentDraft, String, String?, Boolean, Boolean, Boolean) -> Boolean,
+    onCreated: (String, String) -> Unit,
 ) {
-    var name by remember { mutableStateOf("") }
-    var cloneFrom by remember { mutableStateOf("") }
-    var cloneAll by rememberSaveable { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    var name by remember(initialClone) { mutableStateOf(initialClone?.let { "$it-copy" }.orEmpty()) }
+    var description by remember { mutableStateOf("") }
+    var soul by remember { mutableStateOf("") }
+    var provider by remember { mutableStateOf("") }
+    var model by remember { mutableStateOf("") }
+    var targetBackendId by rememberSaveable(activeBackendId) { mutableStateOf(activeBackendId) }
+    var cloneFrom by remember(initialClone) { mutableStateOf(initialClone.orEmpty()) }
+    var cloneAll by rememberSaveable(initialClone) { mutableStateOf(initialClone != null) }
     var noSkills by rememberSaveable { mutableStateOf(false) }
+    var mirrorCredentials by rememberSaveable { mutableStateOf(true) }
+    var advanced by rememberSaveable(initialClone) { mutableStateOf(initialClone != null) }
+    var saving by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("CREATE PROFILE") },
+        title = { Text("CREATE AGENT") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                OutlinedTextField(name, { name = it.take(100) }, label = { Text("Profile name") }, singleLine = true)
+            Column(
+                Modifier.heightIn(max = 620.dp).verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                OutlinedTextField(name, { name = it.take(100) }, label = { Text("Agent handle") }, singleLine = true)
                 OutlinedTextField(
-                    cloneFrom,
-                    { cloneFrom = it.take(100) },
-                    label = { Text("Clone source (optional)") },
-                    supportingText = { Text("Leave empty for a fresh profile. Use an exact existing profile name.") },
-                    singleLine = true,
+                    description,
+                    { description = it.take(500) },
+                    label = { Text("Role / description") },
+                    minLines = 2,
+                    maxLines = 4,
                 )
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Text("Clone sessions and full state", Modifier.weight(1f))
-                    Switch(
-                        checked = cloneAll,
-                        onCheckedChange = { cloneAll = it },
-                        modifier = Modifier.semantics { contentDescription = "Clone sessions and full state" },
-                    )
+                Text("TARGET BACKEND", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+                backends.forEach { backend ->
+                    if (backend.id == targetBackendId) {
+                        Button(onClick = { targetBackendId = backend.id }, modifier = Modifier.fillMaxWidth()) {
+                            Text(backend.label)
+                        }
+                    } else {
+                        OutlinedButton(onClick = { targetBackendId = backend.id }, modifier = Modifier.fillMaxWidth()) {
+                            Text(backend.label)
+                        }
+                    }
                 }
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Text("Start without bundled skills", Modifier.weight(1f))
+                    Text("Advanced setup", Modifier.weight(1f))
                     Switch(
-                        checked = noSkills,
-                        onCheckedChange = { noSkills = it },
-                        modifier = Modifier.semantics { contentDescription = "Start without bundled skills" },
+                        checked = advanced,
+                        onCheckedChange = { advanced = it },
+                        modifier = Modifier.semantics { contentDescription = "Advanced agent setup" },
                     )
                 }
+                if (advanced) {
+                    OutlinedTextField(
+                        cloneFrom,
+                        { cloneFrom = it.take(100) },
+                        label = { Text("Clone source (optional)") },
+                        supportingText = {
+                            Text(
+                                "Fresh inherits working credentials. Existing: " +
+                                    profiles.joinToString { it.name }.take(240),
+                            )
+                        },
+                        singleLine = true,
+                    )
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Text("Clone sessions and full state", Modifier.weight(1f))
+                        Switch(
+                            checked = cloneAll,
+                            onCheckedChange = { cloneAll = it },
+                            modifier = Modifier.semantics { contentDescription = "Clone sessions and full state" },
+                        )
+                    }
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Text("Start without bundled skills", Modifier.weight(1f))
+                        Switch(
+                            checked = noSkills,
+                            onCheckedChange = { noSkills = it },
+                            modifier = Modifier.semantics { contentDescription = "Start without bundled skills" },
+                        )
+                    }
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Text("Share working credentials", Modifier.weight(1f))
+                        Switch(
+                            checked = mirrorCredentials,
+                            onCheckedChange = { mirrorCredentials = it },
+                            modifier = Modifier.semantics { contentDescription = "Share working credentials" },
+                        )
+                    }
+                    OutlinedTextField(soul, { soul = it.take(131_072) }, label = { Text("SOUL.md") }, minLines = 5, maxLines = 10)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(provider, { provider = it.take(200) }, label = { Text("Provider") }, modifier = Modifier.weight(1f))
+                        OutlinedTextField(model, { model = it.take(200) }, label = { Text("Model") }, modifier = Modifier.weight(1f))
+                    }
+                }
+                error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
             }
         },
-        confirmButton = { TextButton(onClick = { onCreate(name, cloneFrom, cloneAll, noSkills) }, enabled = name.isNotBlank()) { Text("Create") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    saving = true
+                    error = null
+                    scope.launch {
+                        try {
+                            if (
+                                onCreate(
+                                    BotAgentDraft(name, description, soul, provider, model),
+                                    targetBackendId,
+                                    cloneFrom.takeIf(String::isNotBlank),
+                                    cloneAll,
+                                    noSkills,
+                                    mirrorCredentials,
+                                )
+                            ) onCreated(name.trim(), targetBackendId) else error = "Hermes could not create this agent"
+                        } catch (cancelled: CancellationException) {
+                            throw cancelled
+                        } catch (cause: Throwable) {
+                            error = cause.message ?: "Hermes could not create this agent"
+                        } finally {
+                            saving = false
+                        }
+                    }
+                },
+                enabled = name.isNotBlank() && !saving && (provider.isBlank() == model.isBlank()) &&
+                    backends.any { it.id == targetBackendId } &&
+                    (cloneFrom.isBlank() || profiles.any { it.name == cloneFrom.trim() }),
+            ) { Text(if (saving) "Creating…" else "Create and chat") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss, enabled = !saving) { Text("Cancel") } },
     )
 }
 
@@ -1164,8 +1651,93 @@ private fun SkillHubRow(skill: SkillHubResult, onReview: (String) -> Unit, modif
 }
 
 @Composable
+internal fun BotRoutinesDialog(
+    state: HermesState,
+    owner: String,
+    onRefresh: () -> Unit,
+    onSetEnabled: (String, Boolean) -> Unit,
+    onTrigger: (String) -> Unit,
+    onLoadRuns: (String) -> Unit,
+    onOpenRun: (StoredSession) -> Unit,
+    onCreate: (String, String, String, String) -> Unit,
+    onUpdate: (String, String, String, String, String) -> Unit,
+    onDelete: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var creating by rememberSaveable(owner) { mutableStateOf(false) }
+    var editingId by remember(owner) { mutableStateOf<String?>(null) }
+    var deleteId by remember(owner) { mutableStateOf<String?>(null) }
+    var expandedId by remember(owner) { mutableStateOf<String?>(null) }
+    val routines = state.cronJobs.filter { it.botRoutineOwner() == owner.lowercase() }
+    val editing = routines.firstOrNull { it.id == editingId }
+    val deleting = routines.firstOrNull { it.id == deleteId }
+    LaunchedEffect(owner) { onRefresh() }
+    if (creating || editing != null) {
+        CronEditorDialog(
+            job = editing,
+            owner = owner,
+            onDismiss = { creating = false; editingId = null },
+            onSave = { name, prompt, schedule, deliver ->
+                if (editing == null) onCreate(name, prompt, schedule, deliver)
+                else onUpdate(editing.id, name, prompt, schedule, deliver)
+                creating = false
+                editingId = null
+            },
+        )
+        return
+    }
+    if (deleting != null) {
+        AlertDialog(
+            onDismissRequest = { deleteId = null },
+            title = { Text("Delete ${deleting.botRoutineTitle()}?") },
+            text = { Text("Future runs stop. Existing run history and the bot's chats are kept.") },
+            confirmButton = {
+                TextButton(onClick = { deleteId = null; onDelete(deleting.id) }) { Text("Delete") }
+            },
+            dismissButton = { TextButton(onClick = { deleteId = null }) { Text("Cancel") } },
+        )
+        return
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("${owner.replaceFirstChar(Char::uppercase)} routines") },
+        text = {
+            Column(
+                Modifier.fillMaxWidth().heightIn(max = 560.dp).verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text("Scheduled work runs on this Hermes backend and stays attached to this bot.", style = MaterialTheme.typography.bodySmall)
+                if (state.managementLoading && routines.isEmpty()) CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
+                if (!state.managementLoading && routines.isEmpty()) Text("No routines yet.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                routines.forEach { job ->
+                    CronRow(
+                        job = job,
+                        title = job.botRoutineTitle(),
+                        onSetEnabled = onSetEnabled,
+                        onTrigger = onTrigger,
+                        runs = state.cronRuns[job.id],
+                        expanded = expandedId == job.id,
+                        onHistory = {
+                            expandedId = job.id.takeUnless { expandedId == job.id }
+                            if (expandedId == job.id) onLoadRuns(job.id)
+                        },
+                        onOpenRun = onOpenRun,
+                        onEdit = { editingId = job.id },
+                        onDelete = { deleteId = job.id },
+                    )
+                }
+                state.error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+            }
+        },
+        confirmButton = { TextButton(onClick = { creating = true }) { Text("New routine") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Done") } },
+    )
+}
+
+@Composable
 private fun CronRow(
     job: CronJob,
+    title: String = job.name?.takeIf(String::isNotBlank) ?: job.id,
     onSetEnabled: (String, Boolean) -> Unit,
     onTrigger: (String) -> Unit,
     runs: List<StoredSession>?,
@@ -1182,12 +1754,43 @@ private fun CronRow(
                 Icon(Icons.Outlined.Schedule, null, tint = MaterialTheme.colorScheme.primary)
                 Spacer(Modifier.width(10.dp))
                 Column(Modifier.weight(1f)) {
-                    Text(job.name?.takeIf(String::isNotBlank) ?: job.id, fontWeight = FontWeight.SemiBold)
+                    Text(title, fontWeight = FontWeight.SemiBold)
                     Text(
                         job.scheduleDisplay ?: job.schedule?.display ?: job.schedule?.expr ?: "Schedule unavailable",
                         style = MaterialTheme.typography.bodySmall,
                     )
                 }
+            }
+            job.prompt?.takeIf(String::isNotBlank)?.let {
+                Text(it, style = MaterialTheme.typography.bodyMedium, maxLines = 3, overflow = TextOverflow.Ellipsis)
+            }
+            Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(
+                    if (job.enabled) "ENABLED" else "PAUSED",
+                    Modifier.fillMaxWidth(),
+                    style = MaterialTheme.typography.labelSmall,
+                )
+                job.nextRunAt?.let {
+                    Text(
+                        "NEXT $it",
+                        Modifier.fillMaxWidth(),
+                        style = MaterialTheme.typography.labelSmall,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                job.deliver?.let {
+                    Text(
+                        "DELIVER $it",
+                        Modifier.fillMaxWidth(),
+                        style = MaterialTheme.typography.labelSmall,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+            job.lastError?.let { Text("Last failure: $it", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                 IconButton(onClick = { onSetEnabled(job.id, !job.enabled) }) {
                     Icon(if (job.enabled) Icons.Outlined.Pause else Icons.Outlined.PlayArrow, if (job.enabled) "Pause job" else "Resume job")
                 }
@@ -1195,15 +1798,6 @@ private fun CronRow(
                 IconButton(onClick = onEdit) { Icon(Icons.Outlined.Edit, "Edit job") }
                 IconButton(onClick = onDelete) { Icon(Icons.Outlined.Delete, "Delete job") }
             }
-            job.prompt?.takeIf(String::isNotBlank)?.let {
-                Text(it, style = MaterialTheme.typography.bodyMedium, maxLines = 3, overflow = TextOverflow.Ellipsis)
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text(if (job.enabled) "ENABLED" else "PAUSED", style = MaterialTheme.typography.labelSmall)
-                job.nextRunAt?.let { Text("NEXT $it", style = MaterialTheme.typography.labelSmall) }
-                job.deliver?.let { Text("DELIVER $it", style = MaterialTheme.typography.labelSmall) }
-            }
-            job.lastError?.let { Text("Last failure: $it", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
             TextButton(onClick = onHistory) {
                 Icon(Icons.Outlined.History, null, Modifier.size(18.dp))
                 Spacer(Modifier.width(6.dp))
@@ -1245,16 +1839,21 @@ private fun CronRow(
 @Composable
 private fun CronEditorDialog(
     job: CronJob?,
+    owner: String? = null,
     onDismiss: () -> Unit,
     onSave: (String, String, String, String) -> Unit,
 ) {
-    var name by remember(job?.id) { mutableStateOf(job?.name.orEmpty()) }
+    var name by remember(job?.id, owner) { mutableStateOf(if (owner == null) job?.name.orEmpty() else job?.botRoutineTitle().orEmpty()) }
     var prompt by remember(job?.id) { mutableStateOf(job?.prompt.orEmpty()) }
-    var schedule by remember(job?.id) {
-        mutableStateOf(job?.schedule?.expr ?: job?.scheduleDisplay.orEmpty())
+    var schedule by remember(job?.id, owner) {
+        mutableStateOf(
+            if (job == null) BotSchedule()
+            else BotSchedule.parse(job.schedule?.expr ?: job.schedule?.display ?: job.scheduleDisplay.orEmpty()),
+        )
     }
     var deliver by remember(job?.id) { mutableStateOf(job?.deliver.orEmpty()) }
-    val valid = prompt.isNotBlank() && schedule.isNotBlank()
+    val scheduleExpression = schedule.expression()
+    val valid = prompt.isNotBlank() && scheduleExpression.isNotBlank()
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(if (job == null) "CREATE CRON JOB" else "EDIT CRON JOB") },
@@ -1265,20 +1864,98 @@ private fun CronEditorDialog(
             ) {
                 OutlinedTextField(name, { name = it.take(200) }, label = { Text("Name") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
                 OutlinedTextField(prompt, { prompt = it }, label = { Text("Hermes prompt") }, modifier = Modifier.fillMaxWidth(), minLines = 3, maxLines = 7)
-                OutlinedTextField(
-                    schedule,
-                    { schedule = it },
-                    label = { Text("Exact schedule") },
-                    supportingText = { Text("Cron expression or schedule form accepted by this Hermes server; timezone is evaluated server-side.") },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true,
-                )
+                BotScheduleEditor(schedule, { schedule = it })
                 OutlinedTextField(deliver, { deliver = it }, label = { Text("Delivery destination (optional)") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
             }
         },
-        confirmButton = { TextButton(onClick = { onSave(name, prompt, schedule, deliver) }, enabled = valid) { Text("Save") } },
+        confirmButton = {
+            TextButton(
+                onClick = { onSave(owner?.let { botRoutineName(it, name) } ?: name, prompt, scheduleExpression, deliver) },
+                enabled = valid,
+            ) { Text("Save") }
+        },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
+}
+
+@Composable
+private fun BotScheduleEditor(value: BotSchedule, onChange: (BotSchedule) -> Unit) {
+    val labels = listOf(
+        BotScheduleFrequency.ONCE to "Once",
+        BotScheduleFrequency.HOURLY to "Hourly",
+        BotScheduleFrequency.DAILY to "Daily",
+        BotScheduleFrequency.WEEKDAYS to "Weekdays",
+        BotScheduleFrequency.WEEKLY to "Weekly",
+        BotScheduleFrequency.MONTHLY to "Monthly",
+        BotScheduleFrequency.INTERVAL to "Interval",
+        BotScheduleFrequency.ADVANCED to "Advanced",
+    )
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("Schedule", style = MaterialTheme.typography.labelLarge)
+        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            labels.forEach { (frequency, label) ->
+                FilterChip(selected = value.frequency == frequency, onClick = { onChange(value.copy(frequency = frequency)) }, label = { Text(label) })
+            }
+        }
+        when (value.frequency) {
+            BotScheduleFrequency.ONCE, BotScheduleFrequency.INTERVAL -> {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedTextField(
+                        value.amount.toString(),
+                        { next -> next.filter(Char::isDigit).toIntOrNull()?.let { onChange(value.copy(amount = it.coerceIn(1, 9999))) } },
+                        label = { Text(if (value.frequency == BotScheduleFrequency.ONCE) "Run in" else "Every") },
+                        modifier = Modifier.weight(1f),
+                        singleLine = true,
+                    )
+                    "mhd".forEach { unit ->
+                        FilterChip(
+                            selected = value.unit == unit,
+                            onClick = { onChange(value.copy(unit = unit)) },
+                            label = { Text(mapOf('m' to "min", 'h' to "hr", 'd' to "day").getValue(unit)) },
+                        )
+                    }
+                }
+            }
+            BotScheduleFrequency.DAILY, BotScheduleFrequency.WEEKDAYS, BotScheduleFrequency.WEEKLY, BotScheduleFrequency.MONTHLY -> {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value.hour.toString().padStart(2, '0'),
+                        { it.filter(Char::isDigit).toIntOrNull()?.takeIf { hour -> hour in 0..23 }?.let { hour -> onChange(value.copy(hour = hour)) } },
+                        label = { Text("Hour") }, modifier = Modifier.weight(1f), singleLine = true,
+                    )
+                    OutlinedTextField(
+                        value.minute.toString().padStart(2, '0'),
+                        { it.filter(Char::isDigit).toIntOrNull()?.takeIf { minute -> minute in 0..59 }?.let { minute -> onChange(value.copy(minute = minute)) } },
+                        label = { Text("Minute") }, modifier = Modifier.weight(1f), singleLine = true,
+                    )
+                }
+                if (value.frequency == BotScheduleFrequency.WEEKLY) {
+                    OutlinedTextField(
+                        value.weekday.toString(),
+                        { it.filter(Char::isDigit).toIntOrNull()?.takeIf { day -> day in 0..6 }?.let { day -> onChange(value.copy(weekday = day)) } },
+                        label = { Text("Weekday (0 Sunday – 6 Saturday)") }, modifier = Modifier.fillMaxWidth(), singleLine = true,
+                    )
+                }
+                if (value.frequency == BotScheduleFrequency.MONTHLY) {
+                    OutlinedTextField(
+                        value.monthDay.toString(),
+                        { it.filter(Char::isDigit).toIntOrNull()?.takeIf { day -> day in 1..31 }?.let { day -> onChange(value.copy(monthDay = day)) } },
+                        label = { Text("Day of month") }, modifier = Modifier.fillMaxWidth(), singleLine = true,
+                    )
+                }
+            }
+            BotScheduleFrequency.ADVANCED -> OutlinedTextField(
+                value.raw,
+                { onChange(value.copy(raw = it.take(200))) },
+                label = { Text("Exact schedule") },
+                supportingText = { Text("Use a 5-field cron expression or a Hermes schedule such as every 2h.") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+            )
+            BotScheduleFrequency.HOURLY -> Unit
+        }
+        Text(value.expression().ifBlank { "Enter an exact schedule" }, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
 }
 
 @Composable
