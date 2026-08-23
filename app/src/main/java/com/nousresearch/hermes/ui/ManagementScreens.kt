@@ -1764,10 +1764,14 @@ private fun CronRow(
             job.prompt?.takeIf(String::isNotBlank)?.let {
                 Text(it, style = MaterialTheme.typography.bodyMedium, maxLines = 3, overflow = TextOverflow.Ellipsis)
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text(if (job.enabled) "ENABLED" else "PAUSED", style = MaterialTheme.typography.labelSmall)
-                job.nextRunAt?.let { Text("NEXT $it", style = MaterialTheme.typography.labelSmall) }
-                job.deliver?.let { Text("DELIVER $it", style = MaterialTheme.typography.labelSmall) }
+                job.nextRunAt?.let {
+                    Text("NEXT $it", style = MaterialTheme.typography.labelSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                }
+                job.deliver?.let {
+                    Text("DELIVER $it", style = MaterialTheme.typography.labelSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                }
             }
             job.lastError?.let { Text("Last failure: $it", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
