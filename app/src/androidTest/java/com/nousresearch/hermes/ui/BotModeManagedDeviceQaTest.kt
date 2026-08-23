@@ -24,6 +24,7 @@ import androidx.compose.ui.test.junit4.StateRestorationTester
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onParent
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.unit.Density
@@ -312,7 +313,10 @@ class BotModeManagedDeviceQaTest {
                 ).assertExists()
             }
         }
-        val refresh = compose.onNodeWithContentDescription("Refresh conversations").fetchSemanticsNode()
+        val refresh = compose
+            .onNodeWithContentDescription("Refresh conversations", useUnmergedTree = true)
+            .onParent()
+            .fetchSemanticsNode()
         assertTrue(refresh.boundsInRoot.width / density >= 48f)
         assertTrue(refresh.boundsInRoot.height / density >= 48f)
         assertTrue(refresh.config.contains(SemanticsProperties.Role))
