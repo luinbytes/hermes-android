@@ -4612,24 +4612,26 @@ internal fun TransientMessageHost(
         onConsumed(message)
     }
     SnackbarHost(hostState, modifier) { data ->
-        val dismissState = rememberSwipeToDismissBoxState(
-            confirmValueChange = { value ->
-                if (value != SwipeToDismissBoxValue.Settled) data.dismiss()
-                true
-            },
-        )
-        SwipeToDismissBox(
-            state = dismissState,
-            backgroundContent = {},
-            modifier = Modifier.testTag("transient-message"),
-        ) {
-            Snackbar(
-                snackbarData = data,
-                containerColor = MaterialTheme.colorScheme.errorContainer,
-                contentColor = MaterialTheme.colorScheme.onErrorContainer,
-                actionColor = MaterialTheme.colorScheme.onErrorContainer,
-                dismissActionContentColor = MaterialTheme.colorScheme.onErrorContainer,
+        key(data.visuals.message) {
+            val dismissState = rememberSwipeToDismissBoxState(
+                confirmValueChange = { value ->
+                    if (value != SwipeToDismissBoxValue.Settled) data.dismiss()
+                    true
+                },
             )
+            SwipeToDismissBox(
+                state = dismissState,
+                backgroundContent = {},
+                modifier = Modifier.testTag("transient-message"),
+            ) {
+                Snackbar(
+                    snackbarData = data,
+                    containerColor = MaterialTheme.colorScheme.errorContainer,
+                    contentColor = MaterialTheme.colorScheme.onErrorContainer,
+                    actionColor = MaterialTheme.colorScheme.onErrorContainer,
+                    dismissActionContentColor = MaterialTheme.colorScheme.onErrorContainer,
+                )
+            }
         }
     }
 }
