@@ -252,9 +252,7 @@ jobs:
   benchmark:
     name: API 36 benchmarks and Baseline Profile
     if: >-
-      always() &&
-      (needs.quality.result == 'success' ||
-       (github.event_name == 'workflow_dispatch' && inputs.managed_device_qa_only)) &&
+      always() && needs.quality.result == 'success' &&
       (github.event_name == 'workflow_dispatch' ||
        (github.event_name == 'pull_request' && github.base_ref == 'main') ||
        (github.event_name == 'push' && github.ref == 'refs/heads/main' &&
@@ -372,14 +370,21 @@ jobs:
         run: sudo chmod 666 /dev/kvm
       - name: Run Android app matrix
         run: |
+          device_tasks=(
+            :app:pixel2Api28DebugAndroidTest
+            :app:pixel2Api36DebugAndroidTest
+            :app:pixelTabletApi36DebugAndroidTest
+          )
           qa_args=()
           if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.managed_device_qa_only }}" == "true" ]]; then
+            device_tasks=(
+              :app:pixel2Api36DebugAndroidTest
+              :app:pixelTabletApi36DebugAndroidTest
+            )
             qa_args+=("-Pandroid.testInstrumentationRunnerArguments.class=com.nousresearch.hermes.ui.BotModeManagedDeviceQaTest")
           fi
           ./gradlew --no-daemon --no-parallel --max-workers=1 \
-            :app:pixel2Api28DebugAndroidTest \
-            :app:pixel2Api36DebugAndroidTest \
-            :app:pixelTabletApi36DebugAndroidTest \
+            "${device_tasks[@]}" \
             "${qa_args[@]}"
       - uses: actions/upload-artifact@v4
         if: always()
@@ -387,7 +392,7 @@ jobs:
           name: hermes-android-device-test-results
           path: |
             app/build/outputs/androidTest-results/**
-            app/build/outputs/managed_device_android_test_additional_output/**
+            app/build/intermediates/managed_device_android_test_additional_output/**
           if-no-files-found: warn
           retention-days: 14
 
