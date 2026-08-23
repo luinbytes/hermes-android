@@ -6927,6 +6927,7 @@ class HermesRepository @Inject constructor(
             (this is com.nousresearch.hermes.network.HermesHttpException && statusCode in setOf(401, 403))
 
     private fun fail(error: Throwable) {
+        if (error is CancellationException) throw error
         val reconnect = error is ReconnectRequiredException || (error is com.nousresearch.hermes.network.HermesHttpException && error.statusCode in setOf(401, 403))
         val reconnectBackendId = mutableState.value.backend?.id
         if (reconnect) {
@@ -7005,6 +7006,12 @@ class HermesRepository @Inject constructor(
             reconnectRequiredBackendId = mutableState.value.reconnectRequiredBackendId,
             error = error.message ?: error::class.simpleName ?: "Hermes operation failed",
         )
+    }
+
+    fun consumeError(message: String) {
+        mutableState.update { current ->
+            if (current.error == message) current.copy(error = null) else current
+        }
     }
 
     private fun failAgents(error: Throwable) {

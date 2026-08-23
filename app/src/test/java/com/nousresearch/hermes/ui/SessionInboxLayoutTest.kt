@@ -18,6 +18,8 @@ import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.test.swipeLeft
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.unit.Density
@@ -61,6 +63,33 @@ import kotlinx.serialization.json.put
 class SessionInboxLayoutTest {
     @get:Rule
     val compose = createComposeRule()
+
+    @Test
+    fun transientMessagesAutoDismissAndCanBeSwipedAway() {
+        val message = mutableStateOf<String?>("Job was cancelled")
+        compose.mainClock.autoAdvance = false
+        compose.setContent {
+            HermesTheme {
+                TransientMessageHost(message.value, onConsumed = { message.value = null })
+            }
+        }
+
+        compose.mainClock.advanceTimeByFrame()
+        compose.onNodeWithText("Job was cancelled").assertExists()
+        assertEquals(1, compose.onAllNodesWithText("Job was cancelled").fetchSemanticsNodes().size)
+        compose.onNodeWithText("Job was cancelled").performTouchInput { swipeLeft() }
+        compose.mainClock.advanceTimeBy(1_000)
+        compose.waitForIdle()
+        compose.onNodeWithText("Job was cancelled").assertDoesNotExist()
+
+        message.value = "Another error"
+        compose.mainClock.advanceTimeByFrame()
+        compose.onNodeWithText("Another error").assertExists()
+        compose.mainClock.advanceTimeBy(20_000)
+        compose.waitForIdle()
+        compose.onNodeWithText("Another error").assertDoesNotExist()
+        assertEquals(null, message.value)
+    }
 
     @Test
     fun conversationRowFitsCompactWidthAndExposesItsState() {

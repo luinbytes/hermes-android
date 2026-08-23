@@ -319,6 +319,7 @@ class HermesViewModel @Inject constructor(
     )
 
     fun refresh() = viewModelScope.launch { repository.refreshSessions() }
+    fun consumeError(message: String) = repository.consumeError(message)
     fun searchSessions(query: String) = repository.searchSessions(query)
     fun openSession(session: StoredSession) = viewModelScope.launch { repository.openSession(session) }
     fun openBotChat(profile: String, onOpened: (StoredSession?) -> Unit) = viewModelScope.launch {
