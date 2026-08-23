@@ -24,7 +24,6 @@ import androidx.compose.ui.test.junit4.StateRestorationTester
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
-import androidx.compose.ui.test.onParent
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.unit.Density
@@ -314,11 +313,10 @@ class BotModeManagedDeviceQaTest {
             }
         }
         val refresh = compose
-            .onNodeWithContentDescription("Refresh conversations", useUnmergedTree = true)
-            .onParent()
+            .onNodeWithContentDescription("Refresh conversations")
             .fetchSemanticsNode()
-        assertTrue(refresh.boundsInRoot.width / density >= 48f)
-        assertTrue(refresh.boundsInRoot.height / density >= 48f)
+        assertTrue("Refresh touch width must be at least 48dp", refresh.touchBoundsInRoot.width / density >= 48f)
+        assertTrue("Refresh touch height must be at least 48dp", refresh.touchBoundsInRoot.height / density >= 48f)
         assertTrue(refresh.config.contains(SemanticsProperties.Role))
     }
 
