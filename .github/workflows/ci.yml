@@ -2,6 +2,12 @@ name: CI
 
 on:
   workflow_dispatch:
+    inputs:
+      managed_device_qa_only:
+        description: Run managed-device and benchmark QA after a separately green exact-head PR check
+        required: false
+        type: boolean
+        default: false
   push:
     branches: [main, dev]
   pull_request:
@@ -17,6 +23,7 @@ permissions:
 jobs:
   quality:
     name: Tests and lint
+    if: github.event_name != 'workflow_dispatch' || inputs.managed_device_qa_only != true
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -29,7 +36,7 @@ jobs:
       - uses: android-actions/setup-android@v3
       - run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
       - run: >-
-          ./gradlew --no-daemon --no-parallel --max-workers=1
+          ./gradlew --no-daemon --no-parallel --max-workers=2
           :app:testDebugUnitTest :app:lintDebug
 
   release-plan:
@@ -245,7 +252,9 @@ jobs:
   benchmark:
     name: API 36 benchmarks and Baseline Profile
     if: >-
-      always() && needs.quality.result == 'success' &&
+      always() &&
+      (needs.quality.result == 'success' ||
+       (github.event_name == 'workflow_dispatch' && inputs.managed_device_qa_only)) &&
       (github.event_name == 'workflow_dispatch' ||
        (github.event_name == 'pull_request' && github.base_ref == 'main') ||
        (github.event_name == 'push' && github.ref == 'refs/heads/main' &&
@@ -339,7 +348,9 @@ jobs:
   device-tests:
     name: API 28 and API 36 app tests
     if: >-
-      always() && needs.quality.result == 'success' &&
+      always() &&
+      (needs.quality.result == 'success' ||
+       (github.event_name == 'workflow_dispatch' && inputs.managed_device_qa_only)) &&
       (github.event_name == 'workflow_dispatch' ||
        (github.event_name == 'pull_request' && github.base_ref == 'main') ||
        (github.event_name == 'push' && github.ref == 'refs/heads/main' &&
