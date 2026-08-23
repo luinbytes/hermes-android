@@ -168,6 +168,7 @@ import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.UriHandler
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.Role
@@ -4620,6 +4621,7 @@ internal fun TransientMessageHost(
         SwipeToDismissBox(
             state = dismissState,
             backgroundContent = {},
+            modifier = Modifier.testTag("transient-message"),
         ) {
             Snackbar(
                 snackbarData = data,

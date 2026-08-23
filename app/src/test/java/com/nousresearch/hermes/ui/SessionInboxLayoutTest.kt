@@ -77,7 +77,7 @@ class SessionInboxLayoutTest {
         compose.mainClock.advanceTimeByFrame()
         compose.onNodeWithText("Job was cancelled").assertExists()
         assertEquals(1, compose.onAllNodesWithText("Job was cancelled").fetchSemanticsNodes().size)
-        compose.onNodeWithText("Job was cancelled").performTouchInput { swipeLeft() }
+        compose.onNodeWithTag("transient-message").performTouchInput { swipeLeft() }
         compose.mainClock.advanceTimeBy(1_000)
         compose.waitForIdle()
         compose.onNodeWithText("Job was cancelled").assertDoesNotExist()
