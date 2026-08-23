@@ -65,7 +65,7 @@ class SessionInboxLayoutTest {
     val compose = createComposeRule()
 
     @Test
-    fun transientMessagesAutoDismissAndCanBeSwipedAway() {
+    fun transientMessagesRenderOnceAndCanBeSwipedAway() {
         val message = mutableStateOf<String?>("Job was cancelled")
         compose.mainClock.autoAdvance = false
         compose.setContent {
@@ -84,10 +84,22 @@ class SessionInboxLayoutTest {
         compose.mainClock.advanceTimeBy(1_000)
         compose.waitForIdle()
         compose.onNodeWithText("Job was cancelled").assertDoesNotExist()
+    }
 
-        message.value = "Another error"
-        compose.mainClock.advanceTimeBy(1_000)
-        compose.waitForIdle()
+    @Test
+    fun transientMessagesAutoDismiss() {
+        val message = mutableStateOf<String?>("Another error")
+        compose.mainClock.autoAdvance = false
+        compose.setContent {
+            HermesTheme {
+                TransientMessageHost(
+                    message = message.value,
+                    onConsumed = { consumed -> if (message.value == consumed) message.value = null },
+                )
+            }
+        }
+
+        compose.mainClock.advanceTimeByFrame()
         compose.onNodeWithText("Another error").assertExists()
         compose.mainClock.advanceTimeBy(20_000)
         compose.waitForIdle()
