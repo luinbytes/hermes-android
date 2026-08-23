@@ -15,6 +15,9 @@ import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
@@ -111,6 +114,30 @@ class BotModeManagedDeviceQaTest {
         restoration.emulateSavedInstanceStateRestore()
         compose.onNodeWithText("Search conversations").assertExists()
         captureWindow("saved-state-restored")
+    }
+
+    @Test
+    fun botModeSwitchesInboxImmediatelyWithoutRecreatingTheActivity() {
+        var botMode by mutableStateOf(false)
+        val restoration = StateRestorationTester(compose)
+        restoration.setContent {
+            HermesTheme(HermesSkin.NOUS, darkTheme = true) {
+                Surface(Modifier.fillMaxSize().testTag(QA_ROOT)) {
+                    RosterPane(qaState(QaVariant.POPULATED), botModeEnabled = botMode)
+                }
+            }
+        }
+
+        compose.onNodeWithText("Bots").assertDoesNotExist()
+        botMode = true
+        compose.onNodeWithText("Bots").assertExists()
+        compose.onNodeWithText("Search bots").assertExists()
+        compose.onNodeWithText("Sessions").performClick()
+        restoration.emulateSavedInstanceStateRestore()
+        compose.onNodeWithText("Search conversations").assertExists()
+        botMode = false
+        compose.onNodeWithText("Bots").assertDoesNotExist()
+        compose.onNodeWithText("Search conversations").assertExists()
     }
 
     @Test

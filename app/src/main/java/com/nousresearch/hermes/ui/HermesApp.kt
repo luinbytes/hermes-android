@@ -1142,6 +1142,15 @@ private fun ArchitectureStrip() {
     }
 }
 
+internal fun botModeRuntimeReady(
+    enabled: Boolean,
+    state: HermesState,
+    connection: GatewayConnectionState,
+): Boolean = enabled &&
+    connection == GatewayConnectionState.Open &&
+    state.restoration.mutationsEnabled &&
+    !state.backendTransitionInProgress
+
 @Composable
 private fun HermesWorkspace(
     route: HermesRoute,
@@ -1213,9 +1222,11 @@ private fun HermesWorkspace(
         val composerAdaptiveFocusState = rememberAdaptiveFocusState()
         val backendId = requireNotNull(state.backend).id
         val profileId = route.profileIdOr(state.currentProfile)
-        LaunchedEffect(botModeEnabled, backendId) {
+        val botRuntimeReady = botModeRuntimeReady(botModeEnabled, state, connection)
+        LaunchedEffect(botRuntimeReady, backendId) {
+            if (!botRuntimeReady) return@LaunchedEffect
             var cronPoll = 0
-            while (botModeEnabled) {
+            while (true) {
                 managementActions.refreshBotRoster()
                 if (cronPoll++ % 4 == 0) managementActions.refreshCron()
                 delay(15_000)
@@ -1233,14 +1244,23 @@ private fun HermesWorkspace(
         var editingBotGroupId by rememberSaveable(backendId) { mutableStateOf<String?>(null) }
         var routineBotProfile by rememberSaveable(backendId) { mutableStateOf<String?>(null) }
         var remoteBot by remember(backendId) { mutableStateOf<BotConversation?>(null) }
-        if (botModeEnabled) BotActivityNotifications(state)
+        LaunchedEffect(botModeEnabled) {
+            if (!botModeEnabled) {
+                selectedBotGroupId = null
+                editingBotGroupId = null
+                routineBotProfile = null
+                remoteBot = null
+            }
+        }
+        if (botRuntimeReady) BotActivityNotifications(state)
         var botGroupCandidates by remember(backendId) {
             mutableStateOf<List<com.nousresearch.hermes.protocol.BotGroupCandidate>>(emptyList())
         }
         var botGroupCandidatesLoading by remember(backendId) { mutableStateOf(false) }
         var unavailableBotGroupSources by remember(backendId) { mutableStateOf<List<String>>(emptyList()) }
-        LaunchedEffect(botModeEnabled, backendId) {
-            while (botModeEnabled) {
+        LaunchedEffect(botRuntimeReady, backendId) {
+            if (!botRuntimeReady) return@LaunchedEffect
+            while (true) {
                 runCatching { managementActions.botGroupCandidates() }.getOrNull()?.let { result ->
                     botGroupCandidates = result.candidates
                     unavailableBotGroupSources = result.unavailableSources
@@ -2117,8 +2137,15 @@ internal fun SessionRail(
     modifier: Modifier = Modifier,
 ) {
     var query by remember { mutableStateOf("") }
-    var inboxMode by rememberSaveable(botModeEnabled) {
+    var inboxMode by rememberSaveable {
         mutableStateOf(if (botModeEnabled) ChatInboxMode.BOTS else ChatInboxMode.SESSIONS)
+    }
+    var appliedBotMode by rememberSaveable { mutableStateOf(botModeEnabled) }
+    LaunchedEffect(botModeEnabled) {
+        if (appliedBotMode != botModeEnabled) {
+            inboxMode = if (botModeEnabled) ChatInboxMode.BOTS else ChatInboxMode.SESSIONS
+            appliedBotMode = botModeEnabled
+        }
     }
     var pendingDelete by remember { mutableStateOf<StoredSession?>(null) }
     var confirmNewSession by rememberSaveable { mutableStateOf(false) }
