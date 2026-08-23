@@ -82,6 +82,10 @@ class MainActivity : ComponentActivity() {
                 privacyPreferences.botModeEnabled.map<Boolean, Boolean?> { it }
             }
             val botModeEnabled by botModeEnabledFlow.collectAsStateWithLifecycle(initialValue = null)
+            var botModeOverride by remember { mutableStateOf<Boolean?>(null) }
+            LaunchedEffect(botModeEnabled) {
+                if (botModeOverride == botModeEnabled) botModeOverride = null
+            }
             val entryRequests by entryRequestStore.deliveries.collectAsStateWithLifecycle()
             val biometricAvailable = authenticationAvailable()
             val locked = biometricReentry == true && privacyGate.isLocked(enabled = true)
@@ -113,9 +117,13 @@ class MainActivity : ComponentActivity() {
                     onSkinChange = { selected ->
                         lifecycleScope.launch { privacyPreferences.setSkin(selected) }
                     },
-                    botModeEnabled = botModeEnabled == true,
+                    botModeEnabled = botModeOverride ?: (botModeEnabled == true),
                     onBotModeEnabledChange = { enabled ->
-                        lifecycleScope.launch { privacyPreferences.setBotModeEnabled(enabled) }
+                        botModeOverride = enabled
+                        lifecycleScope.launch {
+                            runCatching { privacyPreferences.setBotModeEnabled(enabled) }
+                                .onFailure { botModeOverride = null }
+                        }
                     },
                     entryDelivery = entryRequests.firstOrNull(),
                     onWorkspaceReady = { workspaceReady = true },

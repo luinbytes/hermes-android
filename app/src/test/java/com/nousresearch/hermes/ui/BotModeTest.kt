@@ -1,5 +1,9 @@
 package com.nousresearch.hermes.ui
 
+import com.nousresearch.hermes.data.HermesState
+import com.nousresearch.hermes.data.SessionRestorationState
+import com.nousresearch.hermes.data.SessionRestorationStatus
+import com.nousresearch.hermes.protocol.GatewayConnectionState
 import com.nousresearch.hermes.protocol.ProfileInfo
 import com.nousresearch.hermes.protocol.StoredSession
 import kotlinx.serialization.json.put
@@ -9,6 +13,19 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class BotModeTest {
+    @Test
+    fun `bot polling waits for a restored open workspace`() {
+        val ready = HermesState(
+            restoration = SessionRestorationState(status = SessionRestorationStatus.READY),
+        )
+
+        assertFalse(botModeRuntimeReady(false, ready, GatewayConnectionState.Open))
+        assertFalse(botModeRuntimeReady(true, HermesState(), GatewayConnectionState.Open))
+        assertFalse(botModeRuntimeReady(true, ready, GatewayConnectionState.Connecting(1)))
+        assertFalse(botModeRuntimeReady(true, ready.copy(backendTransitionInProgress = true), GatewayConnectionState.Open))
+        assertTrue(botModeRuntimeReady(true, ready, GatewayConnectionState.Open))
+    }
+
     @Test
     fun `bot conversations are source profiles ordered by recent activity`() {
         val bots = botConversations(
