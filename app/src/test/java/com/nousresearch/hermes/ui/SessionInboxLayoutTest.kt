@@ -19,6 +19,7 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import com.nousresearch.hermes.protocol.StoredSession
@@ -208,6 +209,48 @@ class SessionInboxLayoutTest {
         compose.waitForIdle()
 
         assertEquals(listOf("[bot:coder] Morning plan", "Plan today's work", "0 9 * * *", ""), created)
+    }
+
+    @Test
+    fun botRoutineMetadataRemainsReadableAtLargeText() {
+        compose.setContent {
+            CompositionLocalProvider(LocalDensity provides Density(1f, 1.8f)) {
+                HermesTheme {
+                    Surface(Modifier.width(360.dp)) {
+                        BotRoutinesDialog(
+                            state = HermesState(
+                                cronJobs = listOf(
+                                    CronJob(
+                                        enabled = true,
+                                        id = "daily",
+                                        name = "[bot:default] Medication Checkin",
+                                        prompt = "Daily read-only medication reminder",
+                                        schedule = CronJobSchedule(expr = "0 21 * * *"),
+                                        nextRunAt = "2026-08-23T21:00:00+01:00",
+                                        deliver = "telegram:7071463",
+                                    ),
+                                ),
+                            ),
+                            owner = "default",
+                            onRefresh = {},
+                            onSetEnabled = { _, _ -> },
+                            onTrigger = {},
+                            onLoadRuns = {},
+                            onOpenRun = {},
+                            onCreate = { _, _, _, _ -> },
+                            onUpdate = { _, _, _, _, _ -> },
+                            onDelete = {},
+                            onDismiss = {},
+                        )
+                    }
+                }
+            }
+        }
+
+        compose.onNodeWithText("ENABLED").assertIsDisplayed()
+        compose.onNodeWithText("NEXT 2026-08-23T21:00:00+01:00").assertIsDisplayed()
+        val deliver = compose.onNodeWithText("DELIVER telegram:7071463").assertIsDisplayed().fetchSemanticsNode()
+        assertTrue("Delivery metadata collapsed to ${deliver.boundsInRoot.width}px", deliver.boundsInRoot.width >= 120f)
     }
 
     @Test
