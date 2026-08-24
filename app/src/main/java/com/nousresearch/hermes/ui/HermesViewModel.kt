@@ -119,6 +119,10 @@ class HermesViewModel @Inject constructor(
         notificationForeground = foreground
     }
 
+    fun refreshNotifications() {
+        notificationCoordinator.update(repository.state.value, notificationForeground)
+    }
+
     fun bindHostBackupBackend(backendId: String?) {
         if (mutableHostBackup.value.backendId == null || mutableHostBackup.value.backendId == backendId) return
         hostBackupGeneration += 1

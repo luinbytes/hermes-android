@@ -360,8 +360,22 @@ class SessionInboxLayoutTest {
             ),
             appForeground = true,
         )
+        coordinator.update(
+            initial.copy(
+                cronJobs = listOf(
+                    CronJob(
+                        enabled = true,
+                        id = "daily",
+                        name = "[bot:coder] Daily",
+                        lastRunAt = "third",
+                        lastError = "failed",
+                    ),
+                ),
+            ),
+            appForeground = true,
+        )
         assertEquals(
-            setOf(HermesNotificationKind.COMPLETION, HermesNotificationKind.ACTION_REQUIRED, HermesNotificationKind.CRON_RESULT),
+            HermesNotificationKind.entries.toSet(),
             posted.toSet(),
         )
     }

@@ -208,6 +208,7 @@ internal class BotActivityNotificationCoordinator(
             return
         }
         val previous = activity
+        val nextActivity = bots.associate { it.sourceKey to maxOf(previous[it.sourceKey] ?: 0.0, it.activityTimestamp) }.toMutableMap()
         val openProfile = state.activeStoredSession?.profile.normalizedProfile()
         bots.forEach { bot ->
             if (shouldNotifyBotEvent(
@@ -219,7 +220,7 @@ internal class BotActivityNotificationCoordinator(
                 )
             ) {
                 val session = bot.profile.canonicalSession ?: bot.profile.preferredSession
-                post(
+                if (!post(
                     "bot:${bot.sourceKey}".hashCode(),
                     HermesNotificationKind.COMPLETION,
                     HermesDestinationRoute.Chats(
@@ -227,37 +228,39 @@ internal class BotActivityNotificationCoordinator(
                         bot.profile.name,
                         session?.let { it.resolvedId ?: it.id },
                     ),
-                )
+                )) nextActivity[bot.sourceKey] = previous.getValue(bot.sourceKey)
             }
         }
-        activity = bots.associate { it.sourceKey to maxOf(previous[it.sourceKey] ?: 0.0, it.activityTimestamp) }
+        activity = nextActivity
         val current = state.botGroups.needsYouRoomIds
+        val nextNeedsYou = current.toMutableSet()
         (current - needsYou).forEach { roomId ->
             val room = state.botGroups.rooms.firstOrNull { it.roomId == roomId } ?: return@forEach
             val hidden = botGroupSpeakerHidden(room, bots, currentBackendId, state.botCandidates)
             if (shouldNotifyBotEvent(hidden, initialized = true, changed = true)) {
-                post(
+                if (!post(
                     "group:$currentBackendId:$roomId".hashCode(),
                     HermesNotificationKind.ACTION_REQUIRED,
                     HermesDestinationRoute.Chats(currentBackendId, state.currentProfile),
-                )
+                )) nextNeedsYou -= roomId
             }
         }
-        needsYou = current
+        needsYou = nextNeedsYou
+        val nextRoutineRuns = state.cronJobs.associate { it.id to it.lastRunAt }.toMutableMap()
         state.cronJobs.forEach { job ->
             val owner = job.botRoutineOwner() ?: return@forEach
             val lastRun = job.lastRunAt ?: return@forEach
             val prior = routineRuns[job.id]
             val hidden = bots.firstOrNull { it.profile.name.equals(owner, ignoreCase = true) }?.hidden == true
             if (shouldNotifyBotEvent(hidden, initialized = job.id in routineRuns, changed = prior != lastRun)) {
-                post(
+                if (!post(
                     "routine:$currentBackendId:${job.id}".hashCode(),
                     if (job.lastError.isNullOrBlank()) HermesNotificationKind.CRON_RESULT else HermesNotificationKind.AUTOMATION_FAILURE,
                     HermesDestinationRoute.Automations(currentBackendId, owner, AutomationDestination.CRON, job.id),
-                )
+                )) nextRoutineRuns[job.id] = prior
             }
         }
-        routineRuns = state.cronJobs.associate { it.id to it.lastRunAt }
+        routineRuns = nextRoutineRuns
     }
 
     private fun reset() {

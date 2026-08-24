@@ -456,7 +456,9 @@ fun HermesApp(
     viewModel: HermesViewModel = hiltViewModel(),
 ) {
     val context = LocalContext.current
-    val requestNotifications = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
+    val requestNotifications = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) viewModel.refreshNotifications()
+    }
     val state by viewModel.state.collectAsStateWithLifecycle()
     val startupReady by viewModel.startupReady.collectAsStateWithLifecycle()
     val connection by viewModel.connectionState.collectAsStateWithLifecycle()
@@ -930,6 +932,7 @@ fun HermesApp(
                             onSkinChange = onSkinChange,
                             botModeEnabled = botModeEnabled,
                             onBotModeEnabledChange = onBotModeEnabledChange,
+                            onNotificationsAvailable = viewModel::refreshNotifications,
                             onBack = { appNavController.popBackStack() },
                             modifier = Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding(),
                         )
@@ -1678,6 +1681,7 @@ private fun HermesWorkspace(
                         onSkinChange = onSkinChange,
                         botModeEnabled = botModeEnabled,
                         onBotModeEnabledChange = onBotModeEnabledChange,
+                        onNotificationsAvailable = viewModel::refreshNotifications,
                         onBack = { navigator.back(backendId, profileId) },
                         modifier = Modifier.weight(1f),
                     )
