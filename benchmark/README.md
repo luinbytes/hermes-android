@@ -55,13 +55,18 @@ candidate values may be at most 10% above the accepted baseline. Missing
 metrics fail the comparison. `BenchmarkHarnessTest` verifies the exact 10%
 boundary and rejection above it.
 
+Surface memory evidence gates on anonymous and file-backed RSS. The AndroidX
+heap-size sample is GC-sensitive and is intentionally not included in the
+accepted baseline; the harness still records the stable process RSS signals
+that represent resident memory during each journey.
+
 `accepted-baseline.json` records the API 36 Pixel 6 managed-device medians
-from the accepted evidence run. Pull requests run the comparator against every
-numeric benchmark median and fail when a value regresses by more than 10% or a
-metric disappears. CI retries the managed-device task once after an execution
-failure, then fails if the task remains red. If a completed sample exceeds the
-limit, CI runs one confirmation pass and recomputes the candidate medians
-across both passes; the 10% limit is unchanged, so persistent regressions still
-fail while isolated emulator variance does not. No physical-device result is
-inferred from the emulator; physical reference-device results remain an
-owner-review gate.
+from the accepted evidence run and its three-pass tie-breaker sample. Pull
+requests run the comparator against every numeric benchmark median and fail
+when a value regresses by more than 10% or a metric disappears. CI retries the
+managed-device task once after an execution failure, then fails if the task
+remains red. If a completed sample exceeds the limit, CI runs one confirmation
+pass and recomputes the candidate medians across both passes; the 10% limit is
+unchanged, so persistent regressions still fail while isolated emulator
+variance does not. No physical-device result is inferred from the emulator;
+physical reference-device results remain an owner-review gate.
