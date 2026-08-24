@@ -6562,6 +6562,7 @@ class HermesRepository @Inject constructor(
             } else {
                 loadComposerState()
             }
+            runCatching { refreshProfiles(showLoading = false) }
             mutableStartupReady.value = true
         }.onFailure { error ->
             mutableState.value = mutableState.value.copy(backendTransitionInProgress = false)
