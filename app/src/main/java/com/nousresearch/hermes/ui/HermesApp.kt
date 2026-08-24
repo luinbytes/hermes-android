@@ -873,6 +873,7 @@ fun HermesApp(
             onSkinChange = onSkinChange,
             botModeEnabled = botModeEnabled,
             onBotModeEnabledChange = onBotModeEnabledChange,
+            onNotificationsAvailable = viewModel::refreshNotifications,
         )
     }
     HermesTheme(skin) {
@@ -1320,6 +1321,7 @@ private fun HermesWorkspace(
     onSkinChange: (HermesSkin) -> Unit,
     botModeEnabled: Boolean,
     onBotModeEnabledChange: (Boolean) -> Unit,
+    onNotificationsAvailable: () -> Unit,
 ) {
     val context = LocalContext.current
     val openExternalUrl: (String) -> Unit = remember(context) {
@@ -1681,7 +1683,7 @@ private fun HermesWorkspace(
                         onSkinChange = onSkinChange,
                         botModeEnabled = botModeEnabled,
                         onBotModeEnabledChange = onBotModeEnabledChange,
-                        onNotificationsAvailable = viewModel::refreshNotifications,
+                        onNotificationsAvailable = onNotificationsAvailable,
                         onBack = { navigator.back(backendId, profileId) },
                         modifier = Modifier.weight(1f),
                     )
