@@ -3,6 +3,8 @@
   "source": {
     "workflowRun": 32758523116,
     "commit": "38f0aacd5dd1cd86db3abb9062a784dbb22b3586",
+    "supplementalWorkflowRun": 32769692422,
+    "supplementalCommit": "c0a29326f41cdae50a403468f4bd9282709f1313",
     "device": "pixel6Api36",
     "androidApi": 36,
     "repetitions": {
@@ -19,7 +21,7 @@
     "artifactsJourney.memoryRssFileLastKb": 90212.0,
     "manageJourney.memoryRssAnonLastKb": 48308.0,
     "manageJourney.memoryRssFileLastKb": 81640.0,
-    "composerJourney.memoryRssAnonLastKb": 44888.0,
+    "composerJourney.memoryRssAnonLastKb": 52340.0,
     "composerJourney.memoryRssFileLastKb": 78124.0,
     "transcriptScrollDuringContinuousStreamJourney.memoryRssAnonLastKb": 42484.0,
     "transcriptScrollDuringContinuousStreamJourney.memoryRssFileLastKb": 62260.0,
