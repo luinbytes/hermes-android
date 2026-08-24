@@ -2665,6 +2665,7 @@ class HermesRepository @Inject constructor(
             }
         }.onFailure { error ->
             if (
+                showLoading &&
                 mutableState.value.backend?.id == backend.id &&
                 backendCredentialGeneration.get() == credentialGeneration &&
                 profileRefreshGeneration.get() == refreshGeneration
