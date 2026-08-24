@@ -21,19 +21,19 @@ class HermesNotificationsTest {
     @Test
     @Config(sdk = [Build.VERSION_CODES.BAKLAVA])
     fun freshInstallRequestsNotificationPermissionExactlyOnce() {
-        val context = RuntimeEnvironment.getApplication<android.app.Application>()
+        val context = RuntimeEnvironment.getApplication()
         context.getSharedPreferences("hermes_permissions", android.content.Context.MODE_PRIVATE).edit().clear().commit()
         val requested = mutableListOf<String>()
 
-        assertTrue(requestHermesNotificationPermissionIfNeeded(context, requested::add))
+        assertTrue(requestHermesNotificationPermissionIfNeeded(context) { requested += it })
         assertEquals(listOf(Manifest.permission.POST_NOTIFICATIONS), requested)
-        assertFalse(requestHermesNotificationPermissionIfNeeded(context, requested::add))
+        assertFalse(requestHermesNotificationPermissionIfNeeded(context) { requested += it })
     }
 
     @Test
     @Config(sdk = [Build.VERSION_CODES.P])
     fun preAndroid13PostsWithoutRuntimeNotificationPermission() {
-        val context = RuntimeEnvironment.getApplication<android.app.Application>()
+        val context = RuntimeEnvironment.getApplication()
         createHermesNotificationChannels(context)
 
         assertEquals(HermesNotificationPermission.GRANTED, hermesNotificationPermission(context))
