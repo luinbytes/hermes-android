@@ -19,7 +19,6 @@ import org.robolectric.annotation.Config
 @Config(sdk = [Build.VERSION_CODES.VANILLA_ICE_CREAM])
 class HermesNotificationsTest {
     @Test
-    @Config(sdk = [Build.VERSION_CODES.BAKLAVA])
     fun freshInstallRequestsNotificationPermissionExactlyOnce() {
         val context = RuntimeEnvironment.getApplication()
         context.getSharedPreferences("hermes_permissions", android.content.Context.MODE_PRIVATE).edit().clear().commit()
