@@ -59,6 +59,32 @@ class HermesRepositoryBillingTest {
     private val json = Json { ignoreUnknownKeys = true; explicitNulls = false }
 
     @Test
+    fun `startup discovers Bot Mode from the live gateway contract`() = runBlocking {
+        MockWebServer().use { server ->
+            server.dispatcher = readyDashboardDispatcher(withProfiles = true)
+            server.start()
+            val context = RuntimeEnvironment.getApplication()
+            val backend = backend(server)
+            val registry = BackendRegistry(context, json)
+            val credentials = InMemoryCredentialStore()
+            val gateway = RecordingGateway(json)
+            registry.save(backend)
+            credentials.put(backend.id, SESSION_COOKIE)
+            gateway.enqueue(
+                "profiles.list",
+                json.parseToJsonElement(
+                    """{"profiles":[{"name":"default","is_default":true}],"bot_mode_protocol":true}""",
+                ),
+            )
+
+            val repository = repository(context, registry, credentials, BillingPendingChargeStore(context, json), gateway)
+            awaitReady(repository, backend.id)
+
+            assertTrue(repository.state.value.botModeProtocolSupported)
+        }
+    }
+
+    @Test
     fun `quick agent creation uses current profile contract and opens its canonical chat`() = runBlocking {
         MockWebServer().use { server ->
             server.dispatcher = readyDashboardDispatcher(withProfiles = true)
@@ -2939,6 +2965,7 @@ class HermesRepositoryBillingTest {
     }
 
     private suspend fun awaitReady(repository: HermesRepository, backendId: String) {
+        withTimeout(10_000L) { repository.startupReady.first { it } }
         withTimeout(10_000L) {
             repository.state.first {
                 it.backend?.id == backendId && !it.loading && !it.backendTransitionInProgress

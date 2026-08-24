@@ -2665,6 +2665,7 @@ class HermesRepository @Inject constructor(
             }
         }.onFailure { error ->
             if (
+                showLoading &&
                 mutableState.value.backend?.id == backend.id &&
                 backendCredentialGeneration.get() == credentialGeneration &&
                 profileRefreshGeneration.get() == refreshGeneration
@@ -6562,6 +6563,7 @@ class HermesRepository @Inject constructor(
             } else {
                 loadComposerState()
             }
+            runCatching { refreshProfiles(showLoading = false) }
             mutableStartupReady.value = true
         }.onFailure { error ->
             mutableState.value = mutableState.value.copy(backendTransitionInProgress = false)
