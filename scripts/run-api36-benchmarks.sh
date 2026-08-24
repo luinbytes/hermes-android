@@ -30,7 +30,7 @@ for method in "${methods[@]}"; do
   class="com.nousresearch.hermes.benchmark.${method}"
   benchmark_name=${method#*#}
   passed=false
-  for attempt in 1 2; do
+  for attempt in 1 2 3; do
     rm -rf benchmark/build/outputs/managed_device_android_test_additional_output \
       benchmark/build/test-results
     if ./gradlew --no-daemon --no-parallel --max-workers=1 \
@@ -40,12 +40,12 @@ for method in "${methods[@]}"; do
       passed=true
       break
     fi
-    if (( attempt == 1 )); then
+    if (( attempt < 3 )); then
       echo "$method did not produce valid benchmark evidence; retrying only this method."
     fi
   done
   if [[ $passed != true ]]; then
-    echo "$method failed twice or did not produce valid benchmark evidence." >&2
+    echo "$method failed three times or did not produce valid benchmark evidence." >&2
     exit 1
   fi
   destination="$evidence/${method//#/_}"
