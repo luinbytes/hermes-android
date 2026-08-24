@@ -2965,6 +2965,7 @@ class HermesRepositoryBillingTest {
     }
 
     private suspend fun awaitReady(repository: HermesRepository, backendId: String) {
+        withTimeout(10_000L) { repository.startupReady.first { it } }
         withTimeout(10_000L) {
             repository.state.first {
                 it.backend?.id == backendId && !it.loading && !it.backendTransitionInProgress
