@@ -210,6 +210,7 @@ data class HermesState(
     val cronJobs: List<CronJob> = emptyList(),
     val cronRuns: Map<String, List<StoredSession>> = emptyMap(),
     val profiles: List<ProfileInfo> = emptyList(),
+    val botModeProtocolSupported: Boolean = false,
     val botGroups: BotGroupUiState = BotGroupUiState(),
     val botCandidates: List<BotGroupCandidate> = emptyList(),
     val activeProfile: String = "default",
@@ -334,7 +335,10 @@ data class BotDirectMessage(
     val text: String,
 )
 
-data class BotDirectChat(val messages: List<BotDirectMessage>)
+data class BotDirectChat(
+    val sessionId: String,
+    val messages: List<BotDirectMessage>,
+)
 
 data class EntryAuthoritySnapshot(
     val profileIds: Set<String>,
@@ -1323,13 +1327,16 @@ class HermesRepository @Inject constructor(
         backendId: String,
         profileName: String,
         prompt: String? = null,
+        sessionId: String? = null,
+        fresh: Boolean = false,
     ): BotDirectChat {
         val profile = profileName.trim()
         val message = prompt?.trim()
         require(profile.isNotEmpty()) { "Hermes profile is required" }
         require(prompt == null || !message.isNullOrEmpty()) { "Message is required" }
         return withBotGateway(backendId) { client, _ ->
-            val existing = client.request(
+            val requestedSessionId = sessionId?.trim()?.takeIf(String::isNotEmpty)
+            val existing = if (requestedSessionId == null && !fresh) client.request(
                 "session.list",
                 buildJsonObject {
                     put("profile", profile)
@@ -1338,20 +1345,21 @@ class HermesRepository @Inject constructor(
                     put("include_hidden", true)
                 },
             ).let { json.decodeFromJsonElement(BotSessionPage.serializer(), it) }
-                .sessions.firstOrNull(BotSessionSummary::isCanonicalBotChat)
-            val created = if (existing == null) {
+                .sessions.firstOrNull(BotSessionSummary::isCanonicalBotChat) else null
+            val created = if (requestedSessionId == null && (fresh || existing == null)) {
                 client.request(
                     "session.create",
                     buildJsonObject {
                         put("profile", profile)
-                        put("title", BOT_CHAT_TITLE)
-                        put("hidden", true)
+                        put("title", if (fresh) "New ${profile.replaceFirstChar(Char::uppercase)} chat" else BOT_CHAT_TITLE)
+                        put("hidden", !fresh)
                     },
                 ).let { json.decodeFromJsonElement(SessionCreateResult.serializer(), it) }
             } else {
                 null
             }
-            val durableId = existing?.let { it.resolvedId ?: it.id }
+            val durableId = requestedSessionId
+                ?: existing?.let { it.resolvedId ?: it.id }
                 ?: created?.durableSessionId
                 ?: created?.runtimeSessionId
                 ?: error("Hermes did not return the Bot Chat")
@@ -1385,7 +1393,7 @@ class HermesRepository @Inject constructor(
                 }
                 return resumed
             }
-            if (created != null) {
+            if (created != null && !fresh) {
                 try {
                     client.request(
                         "session.title",
@@ -1403,6 +1411,9 @@ class HermesRepository @Inject constructor(
                     "prompt.submit",
                     buildJsonObject { put("session_id", created.runtimeSessionId); put("text", BOT_CHAT_INTRO) },
                 )
+                if (message != null) {
+                    resumed = waitUntilIdle(resumed.messages.size, requireNewMessage = true)
+                }
             } else if (message != null) {
                 resumed = waitUntilIdle(resumed.messages.size, requireNewMessage = false)
             }
@@ -1415,7 +1426,8 @@ class HermesRepository @Inject constructor(
                 resumed = waitUntilIdle(before, requireNewMessage = true)
             }
             BotDirectChat(
-                resumed.messages.mapIndexedNotNull { index, entry ->
+                sessionId = durableId,
+                messages = resumed.messages.mapIndexedNotNull { index, entry ->
                     entry.botGroupText().takeIf(String::isNotBlank)?.let { text ->
                         BotDirectMessage(entry.id ?: "$durableId:$index", entry.role, text)
                     }
@@ -2420,12 +2432,18 @@ class HermesRepository @Inject constructor(
         refreshCronJobs(null)
     }
 
-    suspend fun refreshBotRoutines(owner: String) {
-        refreshCronJobs(owner)
+    suspend fun refreshBotRoutines(
+        owner: String,
+        backendId: String = mutableState.value.backend?.id.orEmpty(),
+    ) {
+        refreshCronJobs(owner, backendId)
     }
 
-    private suspend fun refreshCronJobs(profile: String?) {
-        val (backend, token) = activeCredentials()
+    private suspend fun refreshCronJobs(
+        profile: String?,
+        backendId: String = mutableState.value.backend?.id.orEmpty(),
+    ) {
+        val (backend, token) = credentialsForBackend(backendId)
         mutableState.value = mutableState.value.copy(managementLoading = true, error = null)
         runCatching { restClient.cronJobs(backend, token, profile) }
             .onSuccess { jobs ->
@@ -2438,8 +2456,11 @@ class HermesRepository @Inject constructor(
             .onFailure(::fail)
     }
 
-    suspend fun refreshCronRuns(jobId: String) {
-        val (backend, token) = activeCredentials()
+    suspend fun refreshCronRuns(
+        jobId: String,
+        backendId: String = mutableState.value.backend?.id.orEmpty(),
+    ) {
+        val (backend, token) = credentialsForBackend(backendId)
         val profile = botRoutineProfile(jobId)
         mutableState.value = mutableState.value.copy(managementLoading = true, error = null)
         runCatching { restClient.cronRuns(backend, token, jobId, profile = profile).runs }
@@ -2453,15 +2474,22 @@ class HermesRepository @Inject constructor(
             .onFailure(::fail)
     }
 
-    suspend fun setCronEnabled(jobId: String, enabled: Boolean) {
-        val (backend, token) = activeCredentials()
+    suspend fun setCronEnabled(
+        jobId: String,
+        enabled: Boolean,
+        backendId: String = mutableState.value.backend?.id.orEmpty(),
+    ) {
+        val (backend, token) = credentialsForBackend(backendId)
         runCatching { restClient.setCronEnabled(backend, token, jobId, enabled, botRoutineProfile(jobId)) }
             .onSuccess(::replaceCronJob)
             .onFailure(::fail)
     }
 
-    suspend fun triggerCron(jobId: String) {
-        val (backend, token) = activeCredentials()
+    suspend fun triggerCron(
+        jobId: String,
+        backendId: String = mutableState.value.backend?.id.orEmpty(),
+    ) {
+        val (backend, token) = credentialsForBackend(backendId)
         runCatching { restClient.triggerCron(backend, token, jobId, botRoutineProfile(jobId)) }
             .onSuccess(::replaceCronJob)
             .onFailure(::fail)
@@ -2471,18 +2499,32 @@ class HermesRepository @Inject constructor(
         createCronForProfile(null, name, prompt, schedule, deliver)
     }
 
-    suspend fun createBotRoutine(owner: String, name: String, prompt: String, schedule: String, deliver: String) {
+    suspend fun createBotRoutine(
+        owner: String,
+        name: String,
+        prompt: String,
+        schedule: String,
+        deliver: String,
+        backendId: String = mutableState.value.backend?.id.orEmpty(),
+    ) {
         require(name.let { BOT_ROUTINE_NAME.matches(it) } && name.startsWith("[bot:${owner.lowercase()}]", ignoreCase = true)) {
             "Bot routine name must match its owner"
         }
-        createCronForProfile(owner, name, prompt, schedule, deliver)
+        createCronForProfile(owner, name, prompt, schedule, deliver, backendId)
     }
 
-    private suspend fun createCronForProfile(profile: String?, name: String, prompt: String, schedule: String, deliver: String) {
+    private suspend fun createCronForProfile(
+        profile: String?,
+        name: String,
+        prompt: String,
+        schedule: String,
+        deliver: String,
+        backendId: String = mutableState.value.backend?.id.orEmpty(),
+    ) {
         val cleanPrompt = prompt.trim()
         val cleanSchedule = schedule.trim()
         require(cleanPrompt.isNotEmpty() && cleanSchedule.isNotEmpty()) { "Cron prompt and schedule are required" }
-        val (backend, token) = activeCredentials()
+        val (backend, token) = credentialsForBackend(backendId)
         runCatching {
             restClient.createCron(
                 backend,
@@ -2498,11 +2540,18 @@ class HermesRepository @Inject constructor(
         }.onSuccess(::replaceCronJob).onFailure(::fail)
     }
 
-    suspend fun updateCron(jobId: String, name: String, prompt: String, schedule: String, deliver: String) {
+    suspend fun updateCron(
+        jobId: String,
+        name: String,
+        prompt: String,
+        schedule: String,
+        deliver: String,
+        backendId: String = mutableState.value.backend?.id.orEmpty(),
+    ) {
         val cleanPrompt = prompt.trim()
         val cleanSchedule = schedule.trim()
         require(cleanPrompt.isNotEmpty() && cleanSchedule.isNotEmpty()) { "Cron prompt and schedule are required" }
-        val (backend, token) = activeCredentials()
+        val (backend, token) = credentialsForBackend(backendId)
         val owner = botRoutineProfile(jobId)
         if (owner != null) require(name.startsWith("[bot:$owner]", ignoreCase = true) && BOT_ROUTINE_NAME.matches(name)) {
             "Bot routine name must match its owner"
@@ -2523,8 +2572,11 @@ class HermesRepository @Inject constructor(
         }.onSuccess(::replaceCronJob).onFailure(::fail)
     }
 
-    suspend fun deleteCron(jobId: String) {
-        val (backend, token) = activeCredentials()
+    suspend fun deleteCron(
+        jobId: String,
+        backendId: String = mutableState.value.backend?.id.orEmpty(),
+    ) {
+        val (backend, token) = credentialsForBackend(backendId)
         runCatching { restClient.deleteCron(backend, token, jobId, botRoutineProfile(jobId)) }
             .onSuccess {
                 mutableState.value = mutableState.value.copy(
@@ -2575,6 +2627,7 @@ class HermesRepository @Inject constructor(
             val groupRefreshOwned = botGroupMutationGeneration.get() == groupGeneration
             mutableState.value = mutableState.value.copy(
                 profiles = profiles.profiles.sortedWith(compareByDescending<ProfileInfo> { it.isDefault }.thenBy { it.name }),
+                botModeProtocolSupported = profiles.botModeProtocol,
                 botGroups = if (groupRefreshOwned) {
                     priorGroups.copy(
                         rooms = activeSnapshot.getOrNull()?.visibleRooms() ?: priorGroups.rooms,
@@ -2858,6 +2911,12 @@ class HermesRepository @Inject constructor(
         }
     }
 
+
+    suspend fun readBotGroupAttachments(uris: List<Uri>): List<BotGroupAttachment> = uris.take(5).map { uri ->
+        attachmentReader.read(uri).let { payload ->
+            BotGroupAttachment(payload.displayName, payload.mimeType, payload.base64)
+        }
+    }
 
     suspend fun sendBotGroupMessage(
         roomId: String,
@@ -3454,11 +3513,16 @@ class HermesRepository @Inject constructor(
         }
     }
 
-    suspend fun describeBotAgent(profileName: String): ProfileDescription {
+    suspend fun describeBotAgent(
+        profileName: String,
+        backendId: String = mutableState.value.backend?.id.orEmpty(),
+    ): ProfileDescription {
         val name = profileName.trim()
         require(name.isNotEmpty()) { "Hermes profile is required" }
-        return gateway.request("profiles.describe", buildJsonObject { put("name", name) })
-            .let { json.decodeFromJsonElement(ProfileDescription.serializer(), it) }
+        return withBotGateway(backendId) { client, _ ->
+            client.request("profiles.describe", buildJsonObject { put("name", name) })
+                .let { json.decodeFromJsonElement(ProfileDescription.serializer(), it) }
+        }
     }
 
     suspend fun createBotAgent(
@@ -3557,29 +3621,34 @@ class HermesRepository @Inject constructor(
         return true
     }
 
-    suspend fun configureBotAgent(draft: BotAgentDraft) {
+    suspend fun configureBotAgent(
+        draft: BotAgentDraft,
+        backendId: String = mutableState.value.backend?.id.orEmpty(),
+    ) {
         val name = draft.name.trim()
         require(name.isNotEmpty()) { "Agent name is required" }
-        val response = gateway.request(
-            "profiles.configure",
-            buildJsonObject {
-                put("name", name)
-                put("description", draft.description.trim())
-                put("soul", draft.soul)
-                if (draft.provider.isNotBlank() && draft.model.isNotBlank()) {
-                    put("provider", draft.provider.trim())
-                    put("model", draft.model.trim())
+        val response = withBotGateway(backendId) { client, _ ->
+            client.request(
+                "profiles.configure",
+                buildJsonObject {
+                    put("name", name)
+                    put("description", draft.description.trim())
+                    put("soul", draft.soul)
+                    if (draft.provider.isNotBlank() && draft.model.isNotBlank()) {
+                        put("provider", draft.provider.trim())
+                        put("model", draft.model.trim())
+                    }
+                    put("disabled_skills", JsonArray(draft.disabledSkills.sorted().map(::JsonPrimitive)))
+                    put("enabled_toolsets", JsonArray(draft.enabledToolsets.sorted().map(::JsonPrimitive)))
+                    put("enabled_mcp_servers", JsonArray(draft.enabledMcpServers.sorted().map(::JsonPrimitive)))
                 }
-                put("disabled_skills", JsonArray(draft.disabledSkills.sorted().map(::JsonPrimitive)))
-                put("enabled_toolsets", JsonArray(draft.enabledToolsets.sorted().map(::JsonPrimitive)))
-                put("enabled_mcp_servers", JsonArray(draft.enabledMcpServers.sorted().map(::JsonPrimitive)))
-            },
-        ).let { json.decodeFromJsonElement(ProfileConfigureResult.serializer(), it) }
+            ).let { json.decodeFromJsonElement(ProfileConfigureResult.serializer(), it) }
+        }
         require(response.ok) {
             val failed = response.applied.filterValues { it.jsonPrimitive.booleanOrNull != true }.keys
             "Hermes could not save ${failed.joinToString().ifBlank { "the agent configuration" }}"
         }
-        refreshProfiles()
+        if (mutableState.value.backend?.id == backendId) refreshProfiles() else botGroupCandidates()
     }
 
     suspend fun profileAvatar(profileName: String): ProfileAsset = gateway.request(
@@ -3601,66 +3670,79 @@ class HermesRepository @Inject constructor(
             ).let { json.decodeFromJsonElement(ProfileAsset.serializer(), it) }
         }
 
-    suspend fun setProfileAvatar(profileName: String, dataUrl: String?) {
-        val response = gateway.request(
-            "profiles.set_asset",
-            buildJsonObject {
-                put("name", profileName.trim())
-                put("asset", "avatar")
-                if (dataUrl == null) put("clear", true) else put("data", dataUrl)
-            },
-        )
+    suspend fun setProfileAvatar(
+        profileName: String,
+        dataUrl: String?,
+        backendId: String = mutableState.value.backend?.id.orEmpty(),
+    ) {
+        val response = withBotGateway(backendId) { client, _ ->
+            client.request(
+                "profiles.set_asset",
+                buildJsonObject {
+                    put("name", profileName.trim())
+                    put("asset", "avatar")
+                    if (dataUrl == null) put("clear", true) else put("data", dataUrl)
+                },
+            )
+        }
         require(response.jsonObject["ok"]?.jsonPrimitive?.booleanOrNull == true) { "Hermes did not save the avatar" }
-        refreshProfiles()
+        if (mutableState.value.backend?.id == backendId) refreshProfiles() else botGroupCandidates()
     }
 
-    suspend fun generateProfileAvatar(profileName: String, prompt: String): String {
+    suspend fun generateProfileAvatar(
+        profileName: String,
+        prompt: String,
+        backendId: String = mutableState.value.backend?.id.orEmpty(),
+    ): String {
         val cleanPrompt = prompt.trim()
         require(cleanPrompt.isNotEmpty()) { "Describe the avatar you want" }
-        val result = gateway.request(
-            "image.generate",
-            buildJsonObject {
-                put("prompt", cleanPrompt)
-                put("aspect_ratio", "square")
-                put("max_bytes", 2_000_000)
-            },
-        ).let { json.decodeFromJsonElement(ImageGenerationResult.serializer(), it) }
+        val result = withBotGateway(backendId) { client, _ ->
+            client.request(
+                "image.generate",
+                buildJsonObject {
+                    put("prompt", cleanPrompt)
+                    put("aspect_ratio", "square")
+                    put("max_bytes", 2_000_000)
+                },
+            ).let { json.decodeFromJsonElement(ImageGenerationResult.serializer(), it) }
+        }
         require(result.available && result.success) { result.error ?: "Image generation is unavailable" }
         val image = result.imageData
             ?: result.image?.takeIf { it.startsWith("data:image/") }
             ?: result.image?.let { restClient.publicImageDataUrl(it) }
             ?: throw IllegalStateException("Hermes could not return this image to Android")
-        setProfileAvatar(profileName, image)
+        setProfileAvatar(profileName, image, backendId)
         return image
     }
 
-    suspend fun profilePetGallery(profileName: String): PetGallery = gateway.request(
-        "pet.gallery",
-        buildJsonObject {
-            put("profile", profileName.trim())
-            put("localOnly", false)
-        },
-    ).let { json.decodeFromJsonElement(PetGallery.serializer(), it) }
+    suspend fun profilePetGallery(
+        profileName: String,
+        backendId: String = mutableState.value.backend?.id.orEmpty(),
+    ): PetGallery = withBotGateway(backendId) { client, _ ->
+        client.request(
+            "pet.gallery",
+            buildJsonObject {
+                put("profile", profileName.trim())
+                put("localOnly", false)
+            },
+        ).let { json.decodeFromJsonElement(PetGallery.serializer(), it) }
+    }
 
-    suspend fun adoptProfilePet(profileName: String, slug: String): String {
+    suspend fun adoptProfilePet(
+        profileName: String,
+        slug: String,
+        backendId: String = mutableState.value.backend?.id.orEmpty(),
+    ): String {
         val profile = profileName.trim()
         val pet = slug.trim()
         require(profile.isNotEmpty() && pet.isNotEmpty()) { "Choose a pet" }
-        gateway.request(
-            "pet.select",
-            buildJsonObject {
-                put("profile", profile)
-                put("slug", pet)
-            },
-        )
-        val cells = gateway.request(
-            "pet.cells",
-            buildJsonObject {
-                put("profile", profile)
-                put("state", "idle")
-                put("cols", 24)
-            },
-        ).jsonObject
+        val cells = withBotGateway(backendId) { client, _ ->
+            client.request("pet.select", buildJsonObject { put("profile", profile); put("slug", pet) })
+            client.request(
+                "pet.cells",
+                buildJsonObject { put("profile", profile); put("state", "idle"); put("cols", 24) },
+            ).jsonObject
+        }
         require(cells["enabled"]?.jsonPrimitive?.booleanOrNull == true) { "Hermes could not render that pet" }
         val frame = cells["frames"]?.jsonArray?.firstOrNull()?.jsonArray
             ?: throw IllegalStateException("Hermes returned no pet artwork")
@@ -3683,7 +3765,7 @@ class HermesRepository @Inject constructor(
         }
         bitmap.recycle()
         val data = "data:image/png;base64,${android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)}"
-        setProfileAvatar(profile, data)
+        setProfileAvatar(profile, data, backendId)
         return data
     }
 
@@ -3789,10 +3871,17 @@ class HermesRepository @Inject constructor(
         }
     }
 
-    suspend fun profileIdentity(name: String): ProfileIdentityDraft {
-        val profile = mutableState.value.profiles.firstOrNull { it.name == name }
+    suspend fun profileIdentity(
+        name: String,
+        backendId: String = mutableState.value.backend?.id.orEmpty(),
+    ): ProfileIdentityDraft {
+        val profile = if (mutableState.value.backend?.id == backendId) {
+            mutableState.value.profiles.firstOrNull { it.name == name }
+        } else {
+            mutableState.value.botCandidates.firstOrNull { it.backendId == backendId && it.profile.name == name }?.profile
+        }
             ?: throw IllegalArgumentException("Unknown Hermes profile")
-        val (backend, token) = activeCredentials()
+        val (backend, token) = credentialsForBackend(backendId)
         val soul = restClient.profileSoul(backend, token, name)
         val setup = restClient.profileSetupCommand(backend, token, name)
         return ProfileIdentityDraft(
@@ -3803,17 +3892,24 @@ class HermesRepository @Inject constructor(
         )
     }
 
-    suspend fun saveProfileSoul(name: String, content: String) {
-        require(mutableState.value.profiles.any { it.name == name }) { "Unknown Hermes profile" }
-        val (backend, token) = activeCredentials()
+    suspend fun saveProfileSoul(
+        name: String,
+        content: String,
+        backendId: String = mutableState.value.backend?.id.orEmpty(),
+    ) {
+        val (backend, token) = credentialsForBackend(backendId)
         restClient.updateProfileSoul(backend, token, name, content)
     }
 
-    suspend fun saveProfileModel(name: String, provider: String, model: String) {
-        require(mutableState.value.profiles.any { it.name == name }) { "Unknown Hermes profile" }
-        val (backend, token) = activeCredentials()
+    suspend fun saveProfileModel(
+        name: String,
+        provider: String,
+        model: String,
+        backendId: String = mutableState.value.backend?.id.orEmpty(),
+    ) {
+        val (backend, token) = credentialsForBackend(backendId)
         restClient.updateProfileModel(backend, token, name, provider, model)
-        refreshProfiles()
+        if (mutableState.value.backend?.id == backendId) refreshProfiles() else botGroupCandidates()
     }
 
     suspend fun refreshStarmap(profile: String) {
@@ -6808,6 +6904,16 @@ class HermesRepository @Inject constructor(
         } finally {
             scoped.disconnect()
         }
+    }
+
+    private suspend fun credentialsForBackend(backendId: String): Pair<BackendConfig, String> {
+        if (mutableState.value.backend?.id == backendId) return activeCredentials()
+        val backend = mutableState.value.savedBackends.firstOrNull { it.id == backendId }
+            ?: throw IllegalArgumentException("Unknown Hermes backend")
+        require(backend.authMode == AuthMode.DASHBOARD_SESSION) { "Reconnect this backend before managing its agents" }
+        val cookie = tokenStore.get(backend.id)
+            ?: throw ReconnectRequiredException("Dashboard session is unavailable for ${backend.label}; reconnect is required.")
+        return backend to cookie.headerValue
     }
 
     private suspend fun activeCredentials(

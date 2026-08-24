@@ -270,6 +270,7 @@ class BotModeManagedDeviceQaTest {
                         running = false,
                         blockingRequests = state.botGroups.blockingRequests,
                         onAnswerBlocking = { _, _ -> },
+                        onReadAttachments = { emptyList() },
                         onSend = { _, _, _ -> },
                         onEdit = {},
                         onBack = null,
