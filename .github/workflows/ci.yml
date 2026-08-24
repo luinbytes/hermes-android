@@ -278,15 +278,7 @@ jobs:
           set -euo pipefail
           ./gradlew --no-daemon --no-parallel --max-workers=1 \
             :app:generateBaselineProfile
-          if ./gradlew --no-daemon --no-parallel --max-workers=1 \
-            :benchmark:pixel6Api36BenchmarkReleaseAndroidTest; then
-            exit 0
-          fi
-          # ponytail: one retry handles managed-device flakes; persistent failures still fail the gate.
-          echo "Benchmark instrumentation failed; retrying once with fresh task outputs."
-          rm -rf benchmark/build/outputs benchmark/build/test-results
-          ./gradlew --no-daemon --no-parallel --max-workers=1 --rerun-tasks \
-            :benchmark:pixel6Api36BenchmarkReleaseAndroidTest
+          ./scripts/run-api36-benchmarks.sh
       - name: Emit benchmark evidence metadata
         run: |
           set -euo pipefail
@@ -326,8 +318,7 @@ jobs:
           set -euo pipefail
           echo "Initial benchmark sample exceeded the baseline; confirming with a second managed-device pass."
           rm -rf benchmark/build/outputs benchmark/build/test-results
-          ./gradlew --no-daemon --no-parallel --max-workers=1 --rerun-tasks \
-            :benchmark:pixel6Api36BenchmarkReleaseAndroidTest
+          ./scripts/run-api36-benchmarks.sh
           mkdir -p "$RUNNER_TEMP/hermes-benchmark/run-2"
           cp -R benchmark/build/outputs/managed_device_android_test_additional_output \
             "$RUNNER_TEMP/hermes-benchmark/run-2/"
