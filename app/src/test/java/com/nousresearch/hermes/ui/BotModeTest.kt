@@ -45,6 +45,28 @@ class BotModeTest {
     }
 
     @Test
+    fun `failed notification post is retried without another bot event`() {
+        var attempts = 0
+        val coordinator = BotActivityNotificationCoordinator { _, _, _ -> ++attempts > 1 }
+        val backend = com.nousresearch.hermes.data.BackendConfig(
+            "mac", "Mac", "https://hermes.test", com.nousresearch.hermes.data.AuthMode.DASHBOARD_SESSION,
+        )
+        val initial = HermesState(
+            backend = backend,
+            profiles = listOf(ProfileInfo(name = "coder", canonicalSession = BotSessionSummary("coder-chat", lastActive = 1.0))),
+        )
+        val completed = initial.copy(
+            profiles = listOf(ProfileInfo(name = "coder", canonicalSession = BotSessionSummary("coder-chat", lastActive = 2.0))),
+        )
+
+        coordinator.update(initial, appForeground = false)
+        coordinator.update(completed, appForeground = false)
+        coordinator.update(completed, appForeground = false)
+
+        assertEquals(2, attempts)
+    }
+
+    @Test
     fun `bot polling waits for a restored open workspace`() {
         val ready = HermesState(
             restoration = SessionRestorationState(status = SessionRestorationStatus.READY),
