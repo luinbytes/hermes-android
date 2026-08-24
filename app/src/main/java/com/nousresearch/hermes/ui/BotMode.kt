@@ -45,7 +45,6 @@ import androidx.compose.material3.TooltipDefaults
 import androidx.compose.material3.rememberTooltipState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -54,7 +53,6 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
@@ -90,7 +88,6 @@ import com.nousresearch.hermes.data.BotDirectChat
 import com.nousresearch.hermes.data.botRoutineOwner
 import com.nousresearch.hermes.data.shouldNotifyBotEvent
 import com.nousresearch.hermes.platform.HermesNotificationKind
-import com.nousresearch.hermes.platform.postHermesNotification
 import com.nousresearch.hermes.ui.navigation.AutomationDestination
 import com.nousresearch.hermes.ui.navigation.HermesDestinationRoute
 import kotlinx.coroutines.CancellationException
@@ -192,15 +189,24 @@ internal fun botGroupSpeakerHidden(
     return localBots.size != 1 || localBots.single().hidden
 }
 
-@Composable
-internal fun BotActivityNotifications(state: HermesState) {
-    val backendId = state.backend?.id ?: return
-    val context = LocalContext.current
-    val bots = botNotificationConversations(state)
-    var activity by remember(backendId) { mutableStateOf(bots.associate { it.sourceKey to it.activityTimestamp }) }
-    var needsYou by remember(backendId) { mutableStateOf(state.botGroups.needsYouRoomIds) }
-    var routineRuns by remember(backendId) { mutableStateOf(state.cronJobs.associate { it.id to it.lastRunAt }) }
-    SideEffect {
+internal class BotActivityNotificationCoordinator(
+    private val post: (Int, HermesNotificationKind, HermesDestinationRoute) -> Boolean,
+) {
+    private var backendId: String? = null
+    private var activity = emptyMap<String, Double>()
+    private var needsYou = emptySet<String>()
+    private var routineRuns = emptyMap<String, String?>()
+
+    fun update(state: HermesState, appForeground: Boolean) {
+        val currentBackendId = state.backend?.id ?: return reset()
+        val bots = botNotificationConversations(state)
+        if (backendId != currentBackendId) {
+            backendId = currentBackendId
+            activity = bots.associate { it.sourceKey to it.activityTimestamp }
+            needsYou = state.botGroups.needsYouRoomIds
+            routineRuns = state.cronJobs.associate { it.id to it.lastRunAt }
+            return
+        }
         val previous = activity
         val openProfile = state.activeStoredSession?.profile.normalizedProfile()
         bots.forEach { bot ->
@@ -208,50 +214,57 @@ internal fun BotActivityNotifications(state: HermesState) {
                     hidden = bot.hidden,
                     initialized = bot.sourceKey in previous,
                     changed = bot.activityTimestamp > (previous[bot.sourceKey] ?: bot.activityTimestamp),
-                    open = bot.backendId == backendId && bot.profile.name.normalizedProfile() == openProfile,
+                    open = appForeground && bot.backendId == currentBackendId &&
+                        bot.profile.name.normalizedProfile() == openProfile,
                 )
             ) {
                 val session = bot.profile.canonicalSession ?: bot.profile.preferredSession
-                postHermesNotification(context,
+                post(
                     "bot:${bot.sourceKey}".hashCode(),
                     HermesNotificationKind.COMPLETION,
-                    HermesDestinationRoute.Chats(bot.backendId.ifBlank { backendId }, bot.profile.name, session?.let { it.resolvedId ?: it.id }),
+                    HermesDestinationRoute.Chats(
+                        bot.backendId.ifBlank { currentBackendId },
+                        bot.profile.name,
+                        session?.let { it.resolvedId ?: it.id },
+                    ),
                 )
             }
         }
         activity = bots.associate { it.sourceKey to maxOf(previous[it.sourceKey] ?: 0.0, it.activityTimestamp) }
-    }
-    SideEffect {
         val current = state.botGroups.needsYouRoomIds
-        val previous = needsYou
-        (current - previous).forEach { roomId ->
+        (current - needsYou).forEach { roomId ->
             val room = state.botGroups.rooms.firstOrNull { it.roomId == roomId } ?: return@forEach
-            val hidden = botGroupSpeakerHidden(room, bots, backendId, state.botCandidates)
+            val hidden = botGroupSpeakerHidden(room, bots, currentBackendId, state.botCandidates)
             if (shouldNotifyBotEvent(hidden, initialized = true, changed = true)) {
-                postHermesNotification(context,
-                    "group:$backendId:$roomId".hashCode(),
+                post(
+                    "group:$currentBackendId:$roomId".hashCode(),
                     HermesNotificationKind.ACTION_REQUIRED,
-                    HermesDestinationRoute.Chats(backendId, state.currentProfile),
+                    HermesDestinationRoute.Chats(currentBackendId, state.currentProfile),
                 )
             }
         }
         needsYou = current
-    }
-    SideEffect {
         state.cronJobs.forEach { job ->
             val owner = job.botRoutineOwner() ?: return@forEach
             val lastRun = job.lastRunAt ?: return@forEach
             val prior = routineRuns[job.id]
             val hidden = bots.firstOrNull { it.profile.name.equals(owner, ignoreCase = true) }?.hidden == true
             if (shouldNotifyBotEvent(hidden, initialized = job.id in routineRuns, changed = prior != lastRun)) {
-                postHermesNotification(context,
-                    "routine:$backendId:${job.id}".hashCode(),
+                post(
+                    "routine:$currentBackendId:${job.id}".hashCode(),
                     if (job.lastError.isNullOrBlank()) HermesNotificationKind.CRON_RESULT else HermesNotificationKind.AUTOMATION_FAILURE,
-                    HermesDestinationRoute.Automations(backendId, owner, AutomationDestination.CRON, job.id),
+                    HermesDestinationRoute.Automations(currentBackendId, owner, AutomationDestination.CRON, job.id),
                 )
             }
         }
         routineRuns = state.cronJobs.associate { it.id to it.lastRunAt }
+    }
+
+    private fun reset() {
+        backendId = null
+        activity = emptyMap()
+        needsYou = emptySet()
+        routineRuns = emptyMap()
     }
 }
 

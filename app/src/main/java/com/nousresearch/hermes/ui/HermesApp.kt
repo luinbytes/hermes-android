@@ -247,6 +247,7 @@ import com.nousresearch.hermes.protocol.PetGallery
 import com.nousresearch.hermes.platform.HermesEntryDelivery
 import com.nousresearch.hermes.platform.HermesEntryRequest
 import com.nousresearch.hermes.platform.newCameraCaptureUri
+import com.nousresearch.hermes.platform.requestHermesNotificationPermissionIfNeeded
 import com.nousresearch.hermes.platform.safeExternalUrl
 import com.nousresearch.hermes.platform.textShareIntent
 import com.nousresearch.hermes.ui.theme.HermesTheme
@@ -454,14 +455,23 @@ fun HermesApp(
     onEntryDiscard: (String) -> Unit = {},
     viewModel: HermesViewModel = hiltViewModel(),
 ) {
+    val context = LocalContext.current
+    val requestNotifications = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
     val state by viewModel.state.collectAsStateWithLifecycle()
     val startupReady by viewModel.startupReady.collectAsStateWithLifecycle()
     val connection by viewModel.connectionState.collectAsStateWithLifecycle()
     val artifactIndex by viewModel.artifactIndex.collectAsStateWithLifecycle()
     val artifactPreferences by viewModel.artifactPreferences.collectAsStateWithLifecycle()
     val hostBackup by viewModel.hostBackup.collectAsStateWithLifecycle()
+    LifecycleResumeEffect(viewModel) {
+        viewModel.setNotificationForeground(true)
+        onPauseOrDispose { viewModel.setNotificationForeground(false) }
+    }
     LaunchedEffect(startupReady) {
-        if (startupReady) onWorkspaceReady()
+        if (startupReady) {
+            onWorkspaceReady()
+            requestHermesNotificationPermissionIfNeeded(context) { requestNotifications.launch(it) }
+        }
     }
     LaunchedEffect(state.backend?.id) { viewModel.bindHostBackupBackend(state.backend?.id) }
     val latestConnectionState = rememberUpdatedState(connection)
@@ -1366,7 +1376,6 @@ private fun HermesWorkspace(
                 remoteProfileEditor = null
             }
         }
-        if (botRuntimeReady) BotActivityNotifications(state)
         var botGroupCandidates by remember(backendId) {
             mutableStateOf<List<com.nousresearch.hermes.protocol.BotGroupCandidate>>(emptyList())
         }
