@@ -9,13 +9,13 @@ on:
         type: boolean
         default: false
   push:
-    branches: [main, dev]
+    branches: [main, prerelease, dev]
   pull_request:
-    branches: [main, dev]
+    branches: [main, prerelease, dev]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main-release' || github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name != 'push' || github.ref != 'refs/heads/main' }}
+  cancel-in-progress: ${{ github.event_name != 'push' || (github.ref != 'refs/heads/main' && github.ref != 'refs/heads/prerelease') }}
 
 permissions:
   contents: read
@@ -254,7 +254,8 @@ jobs:
     if: >-
       always() && needs.quality.result == 'success' &&
       (github.event_name == 'workflow_dispatch' ||
-       (github.event_name == 'pull_request' && github.base_ref == 'main') ||
+       (github.event_name == 'pull_request' && (github.base_ref == 'main' || github.base_ref == 'prerelease')) ||
+       (github.event_name == 'push' && github.ref == 'refs/heads/prerelease') ||
        (github.event_name == 'push' && github.ref == 'refs/heads/main' &&
         needs.release-plan.outputs.release_ready == 'true'))
     needs: [quality, release-plan]
@@ -350,7 +351,8 @@ jobs:
       (needs.quality.result == 'success' ||
        (github.event_name == 'workflow_dispatch' && inputs.managed_device_qa_only)) &&
       (github.event_name == 'workflow_dispatch' ||
-       (github.event_name == 'pull_request' && github.base_ref == 'main') ||
+       (github.event_name == 'pull_request' && (github.base_ref == 'main' || github.base_ref == 'prerelease')) ||
+       (github.event_name == 'push' && github.ref == 'refs/heads/prerelease') ||
        (github.event_name == 'push' && github.ref == 'refs/heads/main' &&
         needs.release-plan.outputs.release_ready == 'true'))
     needs: [quality, release-plan]
@@ -404,7 +406,8 @@ jobs:
     name: Reproducible release candidate
     if: >-
       always() && needs.quality.result == 'success' &&
-      ((github.event_name == 'pull_request' && github.base_ref == 'main') ||
+      ((github.event_name == 'pull_request' && (github.base_ref == 'main' || github.base_ref == 'prerelease')) ||
+       (github.event_name == 'push' && github.ref == 'refs/heads/prerelease') ||
        (github.event_name == 'push' && github.ref == 'refs/heads/main' &&
         needs.release-plan.outputs.release_ready == 'true'))
     needs: [quality, release-plan]

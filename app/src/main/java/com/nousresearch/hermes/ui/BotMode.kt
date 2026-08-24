@@ -196,8 +196,8 @@ internal fun botGroupSpeakerHidden(
 internal fun BotActivityNotifications(state: HermesState) {
     val backendId = state.backend?.id ?: return
     val context = LocalContext.current
-    val bots = botConversations(state.profiles, state.sessions, state.activeStoredSession)
-    var activity by remember(backendId) { mutableStateOf(bots.associate { it.profile.name to it.activityTimestamp }) }
+    val bots = botNotificationConversations(state)
+    var activity by remember(backendId) { mutableStateOf(bots.associate { it.sourceKey to it.activityTimestamp }) }
     var needsYou by remember(backendId) { mutableStateOf(state.botGroups.needsYouRoomIds) }
     var routineRuns by remember(backendId) { mutableStateOf(state.cronJobs.associate { it.id to it.lastRunAt }) }
     SideEffect {
@@ -206,20 +206,20 @@ internal fun BotActivityNotifications(state: HermesState) {
         bots.forEach { bot ->
             if (shouldNotifyBotEvent(
                     hidden = bot.hidden,
-                    initialized = bot.profile.name in previous,
-                    changed = bot.activityTimestamp > (previous[bot.profile.name] ?: bot.activityTimestamp),
-                    open = bot.profile.name.normalizedProfile() == openProfile,
+                    initialized = bot.sourceKey in previous,
+                    changed = bot.activityTimestamp > (previous[bot.sourceKey] ?: bot.activityTimestamp),
+                    open = bot.backendId == backendId && bot.profile.name.normalizedProfile() == openProfile,
                 )
             ) {
                 val session = bot.profile.canonicalSession ?: bot.profile.preferredSession
                 postHermesNotification(context,
-                    "bot:$backendId:${bot.profile.name}".hashCode(),
+                    "bot:${bot.sourceKey}".hashCode(),
                     HermesNotificationKind.COMPLETION,
-                    HermesDestinationRoute.Chats(backendId, bot.profile.name, session?.let { it.resolvedId ?: it.id }),
+                    HermesDestinationRoute.Chats(bot.backendId.ifBlank { backendId }, bot.profile.name, session?.let { it.resolvedId ?: it.id }),
                 )
             }
         }
-        activity = bots.associate { it.profile.name to maxOf(previous[it.profile.name] ?: 0.0, it.activityTimestamp) }
+        activity = bots.associate { it.sourceKey to maxOf(previous[it.sourceKey] ?: 0.0, it.activityTimestamp) }
     }
     SideEffect {
         val current = state.botGroups.needsYouRoomIds
@@ -252,6 +252,16 @@ internal fun BotActivityNotifications(state: HermesState) {
             }
         }
         routineRuns = state.cronJobs.associate { it.id to it.lastRunAt }
+    }
+}
+
+internal fun botNotificationConversations(state: HermesState): List<BotConversation> {
+    val activeBackendId = state.backend?.id.orEmpty()
+    return if (state.botCandidates.isEmpty()) {
+        botConversations(state.profiles, state.sessions, state.activeStoredSession)
+            .map { it.copy(backendId = activeBackendId) }
+    } else {
+        botConversations(state.botCandidates, activeBackendId, state.sessions, state.activeStoredSession)
     }
 }
 
@@ -494,7 +504,7 @@ internal fun BotRow(
 internal fun BotDirectChatDialog(
     bot: BotConversation,
     onLoad: suspend () -> BotDirectChat,
-    onSend: suspend (String) -> BotDirectChat,
+    onSend: suspend (String, String) -> BotDirectChat,
     onDismiss: () -> Unit,
 ) {
     val scope = rememberCoroutineScope()
@@ -577,7 +587,7 @@ internal fun BotDirectChatDialog(
                     error = null
                     scope.launch {
                         try {
-                            chat = onSend(message)
+                            chat = onSend(message, requireNotNull(chat).sessionId)
                             draft = ""
                         } catch (cancelled: CancellationException) {
                             throw cancelled
@@ -683,8 +693,10 @@ internal fun BotGroupEditorDialog(
     val picker = androidx.activity.compose.rememberLauncherForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.GetContent(),
     ) { uri ->
-        if (uri != null) runCatching { profileAvatarDataUrl(context, uri, targetDataCharacters = 24_000) }
-            .onSuccess { image = it }.onFailure { error = it.message }
+        if (uri != null) scope.launch {
+            runCatching { profileAvatarDataUrl(context, uri, targetDataCharacters = 24_000) }
+                .onSuccess { image = it }.onFailure { error = it.message }
+        }
     }
     if (confirmDisband) {
         AlertDialog(
@@ -809,6 +821,7 @@ internal fun BotGroupConversationScreen(
     running: Boolean,
     blockingRequests: List<BotGroupBlockingRequest>,
     onAnswerBlocking: suspend (String, Map<String, List<String>>) -> Unit,
+    onReadAttachments: suspend (List<android.net.Uri>) -> List<BotGroupAttachment>,
     onSend: suspend (String, String, List<BotGroupAttachment>) -> Unit,
     onEdit: () -> Unit,
     onBack: (() -> Unit)?,
@@ -820,13 +833,14 @@ internal fun BotGroupConversationScreen(
     var thread by rememberSaveable(room.roomId) { mutableStateOf("main") }
     var error by remember { mutableStateOf<String?>(null) }
     var attachments by remember(room.roomId) { mutableStateOf<List<BotGroupAttachment>>(emptyList()) }
-    val context = androidx.compose.ui.platform.LocalContext.current
     val attachmentPicker = androidx.activity.compose.rememberLauncherForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.OpenMultipleDocuments(),
     ) { uris ->
-        runCatching { uris.take(5).map { botGroupAttachment(context, it) } }
-            .onSuccess { attachments = it }
-            .onFailure { error = it.message ?: "Android could not read that attachment" }
+        scope.launch {
+            runCatching { onReadAttachments(uris) }
+                .onSuccess { attachments = it }
+                .onFailure { error = it.message ?: "Android could not read that attachment" }
+        }
     }
     LaunchedEffect(room.log.size) { if (room.log.isNotEmpty()) listState.animateScrollToItem(room.log.lastIndex) }
     Column(modifier.fillMaxSize()) {
@@ -1018,24 +1032,4 @@ private fun BotGroupBlockingCard(
             error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
         }
     }
-}
-
-private fun botGroupAttachment(context: android.content.Context, uri: android.net.Uri): BotGroupAttachment {
-    val mime = context.contentResolver.getType(uri)?.lowercase()?.takeIf(String::isNotBlank)
-        ?: "application/octet-stream"
-    val name = context.contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
-        if (cursor.moveToFirst()) cursor.getString(0) else null
-    }?.take(180) ?: "attachment"
-    val bytes = context.contentResolver.openInputStream(uri)?.use { input ->
-        val output = java.io.ByteArrayOutputStream()
-        val buffer = ByteArray(8_192)
-        while (output.size() <= 10_000_000) {
-            val count = input.read(buffer, 0, minOf(buffer.size, 10_000_001 - output.size()))
-            if (count <= 0) break
-            output.write(buffer, 0, count)
-        }
-        output.toByteArray()
-    } ?: throw IllegalArgumentException("Android could not read $name")
-    require(bytes.size <= 10_000_000) { "$name is larger than 10 MB" }
-    return BotGroupAttachment(name, mime, android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP))
 }

@@ -4,6 +4,7 @@ import com.nousresearch.hermes.data.HermesState
 import com.nousresearch.hermes.data.SessionRestorationState
 import com.nousresearch.hermes.data.SessionRestorationStatus
 import com.nousresearch.hermes.protocol.GatewayConnectionState
+import com.nousresearch.hermes.protocol.BotGroupCandidate
 import com.nousresearch.hermes.protocol.ProfileInfo
 import com.nousresearch.hermes.protocol.StoredSession
 import kotlinx.serialization.json.put
@@ -17,12 +18,14 @@ class BotModeTest {
     fun `bot polling waits for a restored open workspace`() {
         val ready = HermesState(
             restoration = SessionRestorationState(status = SessionRestorationStatus.READY),
+            botModeProtocolSupported = true,
         )
 
         assertFalse(botModeRuntimeReady(false, ready, GatewayConnectionState.Open))
         assertFalse(botModeRuntimeReady(true, HermesState(), GatewayConnectionState.Open))
         assertFalse(botModeRuntimeReady(true, ready, GatewayConnectionState.Connecting(1)))
         assertFalse(botModeRuntimeReady(true, ready.copy(backendTransitionInProgress = true), GatewayConnectionState.Open))
+        assertFalse(botModeRuntimeReady(true, ready.copy(botModeProtocolSupported = false), GatewayConnectionState.Open))
         assertTrue(botModeRuntimeReady(true, ready, GatewayConnectionState.Open))
     }
 
@@ -81,6 +84,41 @@ class BotModeTest {
         assertTrue(bot.hidden)
         assertTrue(bot.unread)
         assertTrue(bot.isActive(nowMillis = 200_000L, busyProfile = null))
+    }
+
+    @Test
+    fun `notification roster keeps same named bots from every backend`() {
+        val bots = botNotificationConversations(
+            HermesState(
+                backend = com.nousresearch.hermes.data.BackendConfig(
+                    id = "local",
+                    label = "Local",
+                    baseUrl = "https://local.test",
+                    authMode = com.nousresearch.hermes.data.AuthMode.DASHBOARD_SESSION,
+                ),
+                botCandidates = listOf(
+                    BotGroupCandidate(ProfileInfo(name = "coder"), "local", "Local", "coder-local"),
+                    BotGroupCandidate(ProfileInfo(name = "coder"), "cloud", "Cloud", "coder-cloud"),
+                ),
+            ),
+        )
+
+        assertEquals(setOf("local:coder", "cloud:coder"), bots.map { it.sourceKey }.toSet())
+    }
+
+    @Test
+    fun `agent targets exclude remote legacy authentication`() {
+        val active = com.nousresearch.hermes.data.BackendConfig(
+            "active", "Active", "https://active.test", com.nousresearch.hermes.data.AuthMode.TOKEN,
+        )
+        val dashboard = com.nousresearch.hermes.data.BackendConfig(
+            "dashboard", "Dashboard", "https://dashboard.test", com.nousresearch.hermes.data.AuthMode.DASHBOARD_SESSION,
+        )
+        val legacy = com.nousresearch.hermes.data.BackendConfig(
+            "legacy", "Legacy", "https://legacy.test", com.nousresearch.hermes.data.AuthMode.TOKEN,
+        )
+
+        assertEquals(listOf(active, dashboard), botAgentTargetBackends(listOf(active, dashboard, legacy), active.id))
     }
 
     @Test

@@ -99,7 +99,9 @@ internal data class BotSchedule(
                     val weekday = it.groupValues[4]
                     return when {
                         monthDay != "*" && weekday != "*" -> BotSchedule(BotScheduleFrequency.ADVANCED, raw = schedule)
-                        monthDay != "*" -> BotSchedule(BotScheduleFrequency.MONTHLY, hour, minute, monthDay = monthDay.toInt())
+                        monthDay != "*" -> monthDay.toInt().takeIf { it in 1..31 }
+                            ?.let { BotSchedule(BotScheduleFrequency.MONTHLY, hour, minute, monthDay = it) }
+                            ?: BotSchedule(BotScheduleFrequency.ADVANCED, raw = schedule)
                         weekday == "1-5" -> BotSchedule(BotScheduleFrequency.WEEKDAYS, hour, minute)
                         weekday != "*" -> BotSchedule(BotScheduleFrequency.WEEKLY, hour, minute, weekday = weekday.toInt())
                         else -> BotSchedule(BotScheduleFrequency.DAILY, hour, minute)

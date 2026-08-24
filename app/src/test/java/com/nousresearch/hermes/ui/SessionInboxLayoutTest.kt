@@ -220,10 +220,12 @@ class SessionInboxLayoutTest {
                         backendId = "cloud",
                         sourceLabel = "Cloud",
                     ),
-                    onLoad = { BotDirectChat(listOf(BotDirectMessage("one", "assistant", "Earlier"))) },
-                    onSend = { message ->
+                    onLoad = { BotDirectChat("remote", listOf(BotDirectMessage("one", "assistant", "Earlier"))) },
+                    onSend = { message, sessionId ->
+                        assertEquals("remote", sessionId)
                         sent = message
                         BotDirectChat(
+                            "remote",
                             listOf(
                                 BotDirectMessage("one", "assistant", "Earlier"),
                                 BotDirectMessage("two", "user", message),
@@ -505,6 +507,7 @@ class SessionInboxLayoutTest {
                     onSend = { text, thread, _ -> sentText = text; sentThread = thread },
                     blockingRequests = emptyList(),
                     onAnswerBlocking = { _, _ -> },
+                    onReadAttachments = { emptyList() },
                     onEdit = {},
                     onBack = null,
                 )
@@ -551,6 +554,7 @@ class SessionInboxLayoutTest {
                         ),
                     ),
                     onAnswerBlocking = { _, value -> answers = value },
+                    onReadAttachments = { emptyList() },
                     onSend = { _, _, _ -> },
                     onEdit = {},
                     onBack = null,
