@@ -1305,7 +1305,7 @@ internal suspend fun profileAvatarDataUrl(
     } ?: throw IllegalArgumentException("Android could not read that image")
     require(bytes.size <= 2_000_000) { "Avatar images must be 2 MB or smaller" }
     if (targetDataCharacters == null) {
-        return "data:$mime;base64,${Base64.encodeToString(bytes, Base64.NO_WRAP)}"
+        return@withContext "data:$mime;base64,${Base64.encodeToString(bytes, Base64.NO_WRAP)}"
     }
     var bitmap = android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
         ?: throw IllegalArgumentException("Android could not decode that image")
