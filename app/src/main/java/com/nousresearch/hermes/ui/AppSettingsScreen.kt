@@ -56,6 +56,7 @@ internal fun AppSettingsScreen(
     onSkinChange: (HermesSkin) -> Unit,
     botModeEnabled: Boolean,
     onBotModeEnabledChange: (Boolean) -> Unit,
+    onNotificationsAvailable: () -> Unit = {},
     onBack: (() -> Unit)?,
     modifier: Modifier = Modifier,
 ) {
@@ -63,12 +64,14 @@ internal fun AppSettingsScreen(
     var notificationPermission by remember { mutableStateOf(hermesNotificationPermission(context)) }
     val requestNotifications = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
         notificationPermission = hermesNotificationPermission(context)
+        if (notificationPermission == HermesNotificationPermission.GRANTED) onNotificationsAvailable()
     }
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     DisposableEffect(lifecycle) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
                 notificationPermission = hermesNotificationPermission(context)
+                if (notificationPermission == HermesNotificationPermission.GRANTED) onNotificationsAvailable()
             }
         }
         lifecycle.addObserver(observer)

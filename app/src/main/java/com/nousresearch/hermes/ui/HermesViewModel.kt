@@ -21,6 +21,7 @@ import com.nousresearch.hermes.network.HermesRestClient
 import com.nousresearch.hermes.network.DashboardAuthProvider
 import com.nousresearch.hermes.protocol.StoredSession
 import com.nousresearch.hermes.platform.SharedContent
+import com.nousresearch.hermes.platform.postHermesNotification
 import com.nousresearch.hermes.platform.safeContentName
 import com.nousresearch.hermes.security.SecureTokenStore
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -31,6 +32,7 @@ import javax.inject.Inject
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
@@ -99,9 +101,27 @@ class HermesViewModel @Inject constructor(
     private val mutableHostBackup = MutableStateFlow(HostBackupUiState())
     private var hostBackupJob: Job? = null
     private var hostBackupGeneration = 0L
+    private var notificationForeground = false
+    private val notificationCoordinator = BotActivityNotificationCoordinator { id, kind, destination ->
+        postHermesNotification(context, id, kind, destination)
+    }
     val artifactIndex = mutableArtifactIndex.asStateFlow()
     val artifactPreferences = mutableArtifactPreferences.asStateFlow()
     val hostBackup = mutableHostBackup.asStateFlow()
+
+    init {
+        viewModelScope.launch {
+            repository.state.collect { notificationCoordinator.update(it, notificationForeground) }
+        }
+    }
+
+    fun setNotificationForeground(foreground: Boolean) {
+        notificationForeground = foreground
+    }
+
+    fun refreshNotifications() {
+        notificationCoordinator.update(repository.state.value, notificationForeground)
+    }
 
     fun bindHostBackupBackend(backendId: String?) {
         if (mutableHostBackup.value.backendId == null || mutableHostBackup.value.backendId == backendId) return

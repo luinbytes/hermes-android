@@ -5,8 +5,10 @@ import com.nousresearch.hermes.data.SessionRestorationState
 import com.nousresearch.hermes.data.SessionRestorationStatus
 import com.nousresearch.hermes.protocol.GatewayConnectionState
 import com.nousresearch.hermes.protocol.BotGroupCandidate
+import com.nousresearch.hermes.protocol.BotSessionSummary
 import com.nousresearch.hermes.protocol.ProfileInfo
 import com.nousresearch.hermes.protocol.StoredSession
+import com.nousresearch.hermes.platform.HermesNotificationKind
 import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -14,6 +16,56 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class BotModeTest {
+    @Test
+    fun `background completion notifies even when its conversation remains selected`() {
+        val posted = mutableListOf<HermesNotificationKind>()
+        val coordinator = BotActivityNotificationCoordinator { _, kind, _ ->
+            posted += kind
+            true
+        }
+        val backend = com.nousresearch.hermes.data.BackendConfig(
+            "mac", "Mac", "https://hermes.test", com.nousresearch.hermes.data.AuthMode.DASHBOARD_SESSION,
+        )
+        val selected = StoredSession(sessionId = "coder-chat", profile = "coder")
+        val initial = HermesState(
+            backend = backend,
+            profiles = listOf(ProfileInfo(name = "coder", canonicalSession = BotSessionSummary("coder-chat", lastActive = 1.0))),
+            activeStoredSession = selected,
+        )
+
+        coordinator.update(initial, appForeground = true)
+        coordinator.update(
+            initial.copy(
+                profiles = listOf(ProfileInfo(name = "coder", canonicalSession = BotSessionSummary("coder-chat", lastActive = 2.0))),
+            ),
+            appForeground = false,
+        )
+
+        assertEquals(listOf(HermesNotificationKind.COMPLETION), posted)
+    }
+
+    @Test
+    fun `failed notification post is retried without another bot event`() {
+        var attempts = 0
+        val coordinator = BotActivityNotificationCoordinator { _, _, _ -> ++attempts > 1 }
+        val backend = com.nousresearch.hermes.data.BackendConfig(
+            "mac", "Mac", "https://hermes.test", com.nousresearch.hermes.data.AuthMode.DASHBOARD_SESSION,
+        )
+        val initial = HermesState(
+            backend = backend,
+            profiles = listOf(ProfileInfo(name = "coder", canonicalSession = BotSessionSummary("coder-chat", lastActive = 1.0))),
+        )
+        val completed = initial.copy(
+            profiles = listOf(ProfileInfo(name = "coder", canonicalSession = BotSessionSummary("coder-chat", lastActive = 2.0))),
+        )
+
+        coordinator.update(initial, appForeground = false)
+        coordinator.update(completed, appForeground = false)
+        coordinator.update(completed, appForeground = false)
+
+        assertEquals(2, attempts)
+    }
+
     @Test
     fun `bot polling waits for a restored open workspace`() {
         val ready = HermesState(

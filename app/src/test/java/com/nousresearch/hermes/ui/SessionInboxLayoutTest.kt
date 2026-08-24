@@ -1,7 +1,5 @@
 package com.nousresearch.hermes.ui
 
-import android.Manifest
-import android.app.NotificationManager
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.width
 import androidx.compose.material3.Surface
@@ -42,7 +40,7 @@ import com.nousresearch.hermes.data.BotDirectChat
 import com.nousresearch.hermes.data.BotDirectMessage
 import com.nousresearch.hermes.protocol.CronJob
 import com.nousresearch.hermes.protocol.CronJobSchedule
-import com.nousresearch.hermes.platform.createHermesNotificationChannels
+import com.nousresearch.hermes.platform.HermesNotificationKind
 import com.nousresearch.hermes.ui.theme.HermesTheme
 import com.nousresearch.hermes.ui.navigation.HermesRoute
 import java.time.Instant
@@ -56,8 +54,6 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
-import org.robolectric.RuntimeEnvironment
-import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import kotlinx.serialization.json.put
 
@@ -334,11 +330,8 @@ class SessionInboxLayoutTest {
 
     @Test
     fun botActivityProducerPostsOnlyAfterVisibleStateChanges() {
-        val context = RuntimeEnvironment.getApplication()
-        val manager = context.getSystemService(NotificationManager::class.java)
-        manager.cancelAll()
-        createHermesNotificationChannels(context)
-        shadowOf(context).grantPermissions(Manifest.permission.POST_NOTIFICATIONS)
+        val posted = mutableListOf<HermesNotificationKind>()
+        val coordinator = BotActivityNotificationCoordinator { _, kind, _ -> posted += kind; true }
         val backend = BackendConfig("mac", "Mac mini", "https://hermes.test", AuthMode.TOKEN)
         val initialBot = ProfileInfo(
             name = "coder",
@@ -350,31 +343,41 @@ class SessionInboxLayoutTest {
             members = listOf(BotGroupMember("coder", "coder", backend.id, connectionLabel = backend.label)),
             log = listOf(BotGroupEntry("reply", BotGroupSpeaker("member", "coder", backend.label), "@user approve", 1)),
         )
-        val observed = mutableStateOf(
-            HermesState(
-                backend = backend,
-                profiles = listOf(initialBot),
-                botGroups = com.nousresearch.hermes.protocol.BotGroupUiState(rooms = listOf(room)),
-                cronJobs = listOf(CronJob(enabled = true, id = "daily", name = "[bot:coder] Daily", lastRunAt = "first")),
-            ),
+        val initial = HermesState(
+            backend = backend,
+            profiles = listOf(initialBot),
+            botGroups = com.nousresearch.hermes.protocol.BotGroupUiState(rooms = listOf(room)),
+            cronJobs = listOf(CronJob(enabled = true, id = "daily", name = "[bot:coder] Daily", lastRunAt = "first")),
         )
-        compose.setContent { BotActivityNotifications(observed.value) }
-        compose.waitForIdle()
-        assertTrue(manager.activeNotifications.isEmpty())
+        coordinator.update(initial, appForeground = true)
+        assertTrue(posted.isEmpty())
 
-        compose.runOnIdle {
-            observed.value = observed.value.copy(
+        coordinator.update(
+            initial.copy(
                 profiles = listOf(initialBot.copy(canonicalSession = initialBot.canonicalSession?.copy(lastActive = 2.0))),
-                botGroups = observed.value.botGroups.copy(needsYouRoomIds = setOf(room.roomId)),
+                botGroups = initial.botGroups.copy(needsYouRoomIds = setOf(room.roomId)),
                 cronJobs = listOf(CronJob(enabled = true, id = "daily", name = "[bot:coder] Daily", lastRunAt = "second")),
-            )
-        }
-        compose.waitForIdle()
-        val notificationTitles = manager.activeNotifications.map {
-            it.notification.extras.getString(android.app.Notification.EXTRA_TITLE)
-        }
-        assertEquals(notificationTitles.toString(), 3, manager.activeNotifications.size)
-        manager.cancelAll()
+            ),
+            appForeground = true,
+        )
+        coordinator.update(
+            initial.copy(
+                cronJobs = listOf(
+                    CronJob(
+                        enabled = true,
+                        id = "daily",
+                        name = "[bot:coder] Daily",
+                        lastRunAt = "third",
+                        lastError = "failed",
+                    ),
+                ),
+            ),
+            appForeground = true,
+        )
+        assertEquals(
+            HermesNotificationKind.entries.toSet(),
+            posted.toSet(),
+        )
     }
 
     @Test

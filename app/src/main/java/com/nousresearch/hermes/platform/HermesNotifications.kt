@@ -63,6 +63,13 @@ fun markHermesNotificationPermissionRequested(context: Context) {
     permissionPreferences(context).edit().putBoolean(NOTIFICATION_PERMISSION_REQUESTED, true).apply()
 }
 
+fun requestHermesNotificationPermissionIfNeeded(context: Context, request: (String) -> Unit): Boolean {
+    if (hermesNotificationPermission(context) != HermesNotificationPermission.REQUEST) return false
+    markHermesNotificationPermissionRequested(context)
+    request(Manifest.permission.POST_NOTIFICATIONS)
+    return true
+}
+
 fun postHermesNotification(
     context: Context,
     id: Int,

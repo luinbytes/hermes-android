@@ -19,6 +19,35 @@ import org.robolectric.annotation.Config
 @Config(sdk = [Build.VERSION_CODES.VANILLA_ICE_CREAM])
 class HermesNotificationsTest {
     @Test
+    fun freshInstallRequestsNotificationPermissionExactlyOnce() {
+        val context = RuntimeEnvironment.getApplication()
+        context.getSharedPreferences("hermes_permissions", android.content.Context.MODE_PRIVATE).edit().clear().commit()
+        val requested = mutableListOf<String>()
+
+        assertTrue(requestHermesNotificationPermissionIfNeeded(context) { requested += it })
+        assertEquals(listOf(Manifest.permission.POST_NOTIFICATIONS), requested)
+        assertFalse(requestHermesNotificationPermissionIfNeeded(context) { requested += it })
+    }
+
+    @Test
+    @Config(sdk = [Build.VERSION_CODES.P])
+    fun preAndroid13PostsWithoutRuntimeNotificationPermission() {
+        val context = RuntimeEnvironment.getApplication()
+        createHermesNotificationChannels(context)
+
+        assertEquals(HermesNotificationPermission.GRANTED, hermesNotificationPermission(context))
+        assertFalse(requestHermesNotificationPermissionIfNeeded(context) {})
+        assertTrue(
+            postHermesNotification(
+                context,
+                id = 40,
+                kind = HermesNotificationKind.COMPLETION,
+                destination = HermesDestinationRoute.Chats("backend", "profile", "session"),
+            ),
+        )
+    }
+
+    @Test
     fun channelsAndRenderedContentStayPrivate() {
         val context = RuntimeEnvironment.getApplication()
         val manager = context.getSystemService(NotificationManager::class.java)
