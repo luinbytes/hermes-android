@@ -510,6 +510,16 @@ class HermesRepositoryBillingTest {
 
             assertEquals(listOf("Working"), busy.messages.map { it.text })
             assertEquals(current.id, repository.state.value.backend?.id)
+
+            scoped.enqueue(
+                "session.create",
+                json.parseToJsonElement("""{"session_id":"fresh-live","stored_session_id":"fresh-chat","messages":[]}"""),
+            )
+            val fresh = repository.botDirectChat(remote.id, "reviewer", fresh = true)
+            val freshCreate = scoped.requests.last { it.method == "session.create" }.params.toString()
+            assertEquals("fresh-chat", fresh.sessionId)
+            assertTrue(freshCreate.contains("\"hidden\":false"))
+            assertFalse(freshCreate.contains("Bot Chat"))
         }
     }
 
