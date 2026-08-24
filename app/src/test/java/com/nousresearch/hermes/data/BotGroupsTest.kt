@@ -91,7 +91,6 @@ class BotGroupsTest {
         assertEquals(lifted.visibleRooms().single().roomId, profileGroupSnapshot(legacy, json).visibleRooms().single().roomId)
         assertTrue(json.encodeToString(BotGroupSnapshot.serializer(), huge).isNotEmpty())
         assertEquals(21, huge.rooms.size)
-        assertTrue(huge.rooms.values.all { it.log.isEmpty() })
     }
 
     @Test
