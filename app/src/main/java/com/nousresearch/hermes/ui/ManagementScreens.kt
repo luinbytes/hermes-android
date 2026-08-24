@@ -691,6 +691,7 @@ internal fun ProfilesScreen(
     onOpenAgentChat: (String, String) -> Unit,
     initialEditProfile: String? = null,
     onEditorConsumed: () -> Unit = {},
+    profileAdministrationEnabled: Boolean = true,
     onBack: (() -> Unit)?,
     modifier: Modifier = Modifier,
 ) {
@@ -921,6 +922,7 @@ internal fun ProfilesScreen(
                             cloneProfileName = profile.name
                             creating = true
                         },
+                        administrationEnabled = profileAdministrationEnabled,
                         modifier = Modifier.padding(horizontal = 12.dp),
                     )
                 }
@@ -1284,11 +1286,11 @@ private fun AgentCapabilityList(
     }
 }
 
-internal fun profileAvatarDataUrl(
+internal suspend fun profileAvatarDataUrl(
     context: android.content.Context,
     uri: Uri,
     targetDataCharacters: Int? = null,
-): String {
+): String = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
     val mime = context.contentResolver.getType(uri)?.lowercase()
     require(mime in setOf("image/png", "image/jpeg", "image/webp")) { "Choose a PNG, JPEG, or WebP image" }
     val bytes = context.contentResolver.openInputStream(uri)?.use { input ->
@@ -1303,7 +1305,7 @@ internal fun profileAvatarDataUrl(
     } ?: throw IllegalArgumentException("Android could not read that image")
     require(bytes.size <= 2_000_000) { "Avatar images must be 2 MB or smaller" }
     if (targetDataCharacters == null) {
-        return "data:$mime;base64,${Base64.encodeToString(bytes, Base64.NO_WRAP)}"
+        return@withContext "data:$mime;base64,${Base64.encodeToString(bytes, Base64.NO_WRAP)}"
     }
     var bitmap = android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
         ?: throw IllegalArgumentException("Android could not decode that image")
@@ -1331,7 +1333,7 @@ internal fun profileAvatarDataUrl(
     } while (encoded.length > targetDataCharacters && quality >= 38)
     bitmap.recycle()
     require(encoded.length <= targetDataCharacters) { "That picture could not be reduced to the group sync limit" }
-    return encoded
+    encoded
 }
 
 @Composable
@@ -1345,6 +1347,7 @@ private fun ProfileRow(
     onSetActive: () -> Unit,
     onDelete: () -> Unit,
     onDuplicate: () -> Unit,
+    administrationEnabled: Boolean = true,
     modifier: Modifier = Modifier,
 ) {
     val protected = profile.isDefault || isCurrent
@@ -1362,9 +1365,11 @@ private fun ProfileRow(
                 }
                 IconButton(onClick = onStartSession) { Icon(Icons.Outlined.PlayArrow, "Start session in ${profile.name}") }
                 IconButton(onClick = onEditIdentity) { Icon(Icons.Outlined.Description, "Edit identity for ${profile.name}") }
-                IconButton(onClick = onDuplicate) { Icon(Icons.Outlined.Add, "Duplicate ${profile.name}") }
-                if (!profile.isDefault) IconButton(onClick = onRename) { Icon(Icons.Outlined.Edit, "Rename ${profile.name}") }
-                if (!protected) IconButton(onClick = onDelete) { Icon(Icons.Outlined.Delete, "Delete ${profile.name}") }
+                if (administrationEnabled) {
+                    IconButton(onClick = onDuplicate) { Icon(Icons.Outlined.Add, "Duplicate ${profile.name}") }
+                    if (!profile.isDefault) IconButton(onClick = onRename) { Icon(Icons.Outlined.Edit, "Rename ${profile.name}") }
+                    if (!protected) IconButton(onClick = onDelete) { Icon(Icons.Outlined.Delete, "Delete ${profile.name}") }
+                }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
                 if (profile.isDefault) Text("DEFAULT ROOT", style = MaterialTheme.typography.labelSmall)
@@ -1372,7 +1377,7 @@ private fun ProfileRow(
                 Text("${profile.skillCount} SKILLS", style = MaterialTheme.typography.labelSmall)
                 if (isActive) {
                     Text("STICKY DEFAULT", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
-                } else {
+                } else if (administrationEnabled) {
                     TextButton(onClick = onSetActive) {
                         Icon(Icons.Outlined.Star, null, Modifier.size(16.dp))
                         Spacer(Modifier.width(4.dp))
@@ -1394,6 +1399,7 @@ internal fun BotAgentCreateDialog(
     onCreate: suspend (BotAgentDraft, String, String?, Boolean, Boolean, Boolean) -> Boolean,
     onCreated: (String, String) -> Unit,
 ) {
+    val targetBackends = botAgentTargetBackends(backends, activeBackendId)
     val scope = rememberCoroutineScope()
     var name by remember(initialClone) { mutableStateOf(initialClone?.let { "$it-copy" }.orEmpty()) }
     var description by remember { mutableStateOf("") }
@@ -1425,7 +1431,7 @@ internal fun BotAgentCreateDialog(
                     maxLines = 4,
                 )
                 Text("TARGET BACKEND", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
-                backends.forEach { backend ->
+                targetBackends.forEach { backend ->
                     if (backend.id == targetBackendId) {
                         Button(onClick = { targetBackendId = backend.id }, modifier = Modifier.fillMaxWidth()) {
                             Text(backend.label)
@@ -1435,6 +1441,12 @@ internal fun BotAgentCreateDialog(
                             Text(backend.label)
                         }
                     }
+                }
+                if (targetBackends.size < backends.size) {
+                    Text(
+                        "Reconnect legacy backends with Dashboard sign-in before creating agents there.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
                 }
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Text("Advanced setup", Modifier.weight(1f))
@@ -1524,6 +1536,9 @@ internal fun BotAgentCreateDialog(
         dismissButton = { TextButton(onClick = onDismiss, enabled = !saving) { Text("Cancel") } },
     )
 }
+
+internal fun botAgentTargetBackends(backends: List<BackendConfig>, activeBackendId: String): List<BackendConfig> =
+    backends.filter { it.id == activeBackendId || it.authMode == com.nousresearch.hermes.data.AuthMode.DASHBOARD_SESSION }
 
 @Composable
 private fun ProfileRenameDialog(

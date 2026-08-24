@@ -510,6 +510,64 @@ class HermesRepositoryBillingTest {
 
             assertEquals(listOf("Working"), busy.messages.map { it.text })
             assertEquals(current.id, repository.state.value.backend?.id)
+
+            scoped.enqueue(
+                "session.create",
+                json.parseToJsonElement("""{"session_id":"fresh-live","stored_session_id":"fresh-chat","messages":[]}"""),
+            )
+            val fresh = repository.botDirectChat(remote.id, "reviewer", fresh = true)
+            val freshCreate = scoped.requests.last { it.method == "session.create" }.params.toString()
+            assertEquals("fresh-chat", fresh.sessionId)
+            assertTrue(freshCreate.contains("\"hidden\":false"))
+            assertFalse(freshCreate.contains("Bot Chat"))
+        }
+    }
+
+    @Test
+    fun `new remote bot chat waits for its introduction before sending the user prompt`() = runBlocking {
+        MockWebServer().use { server ->
+            server.dispatcher = readyDashboardDispatcher()
+            server.start()
+            val context = RuntimeEnvironment.getApplication()
+            val current = backend(server).copy(id = "personal-ordered-chat", label = "Personal")
+            val remote = current.copy(id = "cloud-ordered-chat", label = "Cloud")
+            val registry = BackendRegistry(context, json)
+            val credentials = InMemoryCredentialStore()
+            val gateway = RecordingGateway(json)
+            val scoped = RecordingGateway(json)
+            gateway.forkedGateway = scoped
+            registry.save(current)
+            registry.save(remote)
+            registry.select(current.id)
+            credentials.put(current.id, SESSION_COOKIE)
+            credentials.put(remote.id, SESSION_COOKIE)
+            val repository = repository(context, registry, credentials, BillingPendingChargeStore(context, json), gateway)
+            awaitReady(repository, current.id)
+            scoped.enqueue("session.list", json.parseToJsonElement("""{"sessions":[]}"""))
+            scoped.enqueue(
+                "session.create",
+                json.parseToJsonElement("""{"session_id":"ordered-live","stored_session_id":"ordered-bot","messages":[]}"""),
+            )
+            scoped.enqueue("session.title", json.parseToJsonElement("""{"status":"ok"}"""))
+            scoped.enqueue("prompt.submit", json.parseToJsonElement("""{"status":"streaming"}"""))
+            scoped.enqueue(
+                "session.resume",
+                json.parseToJsonElement("""{"session_id":"ordered-live","session_key":"ordered-bot","messages":[{"role":"assistant","content":"Hello"}]}"""),
+            )
+            scoped.enqueue("prompt.submit", json.parseToJsonElement("""{"status":"streaming"}"""))
+            scoped.enqueue(
+                "session.resume",
+                json.parseToJsonElement("""{"session_id":"ordered-live","session_key":"ordered-bot","messages":[{"role":"assistant","content":"Hello"},{"role":"user","content":"Status?"},{"role":"assistant","content":"Green"}]}"""),
+            )
+
+            repository.botDirectChat(remote.id, "reviewer", "Status?")
+
+            val orderedMethods = scoped.requests.map { it.method }
+            val submits = scoped.requests.filter { it.method == "prompt.submit" }
+            assertEquals(2, submits.size)
+            assertFalse(submits[0].params.toString().contains("Status?"))
+            assertTrue(submits[1].params.toString().contains("Status?"))
+            assertTrue(orderedMethods.indexOf("session.resume") in (orderedMethods.indexOf("prompt.submit") + 1) until orderedMethods.lastIndexOf("prompt.submit"))
         }
     }
 

@@ -35,6 +35,8 @@ class BotRoutinesTest {
         val mixedDaySelectors = BotSchedule.parse("0 9 1 * 1")
         assertEquals(BotScheduleFrequency.ADVANCED, mixedDaySelectors.frequency)
         assertEquals("0 9 1 * 1", mixedDaySelectors.expression())
+        assertEquals(BotScheduleFrequency.ADVANCED, BotSchedule.parse("0 9 99 * *").frequency)
+        assertEquals("0 9 99 * *", BotSchedule.parse("0 9 99 * *").expression())
         assertEquals("TZ=Europe/London 0 9 * * *", BotSchedule.parse("TZ=Europe/London 0 9 * * *").expression())
     }
 

@@ -339,29 +339,43 @@ private data class ManagementActions(
     val updateSkills: () -> Unit,
     val refreshCron: () -> Unit,
     val refreshBotRoutines: (String) -> Unit,
+    val refreshBotRoutinesAt: (String, String) -> Unit,
     val refreshCronRuns: (String) -> Unit,
+    val refreshCronRunsAt: (String, String) -> Unit,
     val setCronEnabled: (String, Boolean) -> Unit,
+    val setCronEnabledAt: (String, String, Boolean) -> Unit,
     val triggerCron: (String) -> Unit,
+    val triggerCronAt: (String, String) -> Unit,
     val createCron: (String, String, String, String) -> Unit,
     val createBotRoutine: (String, String, String, String, String) -> Unit,
+    val createBotRoutineAt: (String, String, String, String, String, String) -> Unit,
     val updateCron: (String, String, String, String, String) -> Unit,
+    val updateCronAt: (String, String, String, String, String, String) -> Unit,
     val deleteCron: (String) -> Unit,
+    val deleteCronAt: (String, String) -> Unit,
     val refreshProfiles: () -> Unit,
     val refreshBotRoster: () -> Unit,
-    val botDirectChat: suspend (String, String, String?) -> com.nousresearch.hermes.data.BotDirectChat,
+    val botDirectChat: suspend (String, String, String?, String?, Boolean) -> com.nousresearch.hermes.data.BotDirectChat,
     val setBotHidden: (String, String, Boolean) -> Unit,
     val createBotGroup: suspend (String, List<com.nousresearch.hermes.protocol.BotGroupMember>) -> com.nousresearch.hermes.protocol.BotGroupRoom,
     val botGroupCandidates: suspend () -> com.nousresearch.hermes.protocol.BotGroupCandidateResult,
     val updateBotGroup: suspend (com.nousresearch.hermes.protocol.BotGroupRoom) -> com.nousresearch.hermes.protocol.BotGroupRoom,
     val disbandBotGroup: suspend (String) -> Unit,
     val sendBotGroupMessage: suspend (String, String, String, List<com.nousresearch.hermes.protocol.BotGroupAttachment>) -> Unit,
+    val readBotGroupAttachments: suspend (List<android.net.Uri>) -> List<com.nousresearch.hermes.protocol.BotGroupAttachment>,
     val acknowledgeBotGroup: (String) -> Unit,
     val answerBotGroupBlocking: suspend (String, Map<String, List<String>>) -> Unit,
     val describeBotAgent: suspend (String) -> ProfileDescription,
+    val describeBotAgentAt: suspend (String, String) -> ProfileDescription,
     val createBotAgent: suspend (BotAgentDraft, String, String?, Boolean, Boolean, Boolean) -> Boolean,
     val configureBotAgent: suspend (BotAgentDraft) -> Unit,
+    val configureBotAgentAt: suspend (String, BotAgentDraft) -> Unit,
     val profileAvatar: suspend (String) -> ProfileAsset,
     val botProfileAvatar: suspend (String, String) -> ProfileAsset,
+    val setProfileAvatarAt: suspend (String, String, String?) -> Unit,
+    val generateProfileAvatarAt: suspend (String, String, String) -> String,
+    val profilePetGalleryAt: suspend (String, String) -> PetGallery,
+    val adoptProfilePetAt: suspend (String, String, String) -> String,
     val setProfileAvatar: suspend (String, String?) -> Unit,
     val generateProfileAvatar: suspend (String, String) -> String,
     val profilePetGallery: suspend (String) -> PetGallery,
@@ -370,8 +384,11 @@ private data class ManagementActions(
     val setActiveProfile: (String) -> Unit,
     val deleteProfile: (String) -> Unit,
     val profileIdentity: suspend (String) -> ProfileIdentityDraft,
+    val profileIdentityAt: suspend (String, String) -> ProfileIdentityDraft,
     val saveProfileSoul: suspend (String, String) -> Unit,
+    val saveProfileSoulAt: suspend (String, String, String) -> Unit,
     val saveProfileModel: suspend (String, String, String) -> Unit,
+    val saveProfileModelAt: suspend (String, String, String, String) -> Unit,
     val refreshStarmap: (String) -> Unit,
     val loadLearningNode: (String, String) -> Unit,
     val closeLearningNode: () -> Unit,
@@ -500,13 +517,24 @@ fun HermesApp(
             updateSkills = viewModel::updateSkills,
             refreshCron = viewModel::refreshCron,
             refreshBotRoutines = viewModel::refreshBotRoutines,
+            refreshBotRoutinesAt = { backendId, owner -> viewModel.refreshBotRoutines(backendId, owner) },
             refreshCronRuns = viewModel::refreshCronRuns,
+            refreshCronRunsAt = { backendId, jobId -> viewModel.refreshCronRuns(backendId, jobId) },
             setCronEnabled = viewModel::setCronEnabled,
+            setCronEnabledAt = { backendId, jobId, enabled -> viewModel.setCronEnabled(backendId, jobId, enabled) },
             triggerCron = viewModel::triggerCron,
+            triggerCronAt = { backendId, jobId -> viewModel.triggerCron(backendId, jobId) },
             createCron = viewModel::createCron,
             createBotRoutine = viewModel::createBotRoutine,
+            createBotRoutineAt = { source, owner, name, prompt, schedule, deliver ->
+                viewModel.createBotRoutine(source, owner, name, prompt, schedule, deliver)
+            },
             updateCron = viewModel::updateCron,
+            updateCronAt = { source, jobId, name, prompt, schedule, deliver ->
+                viewModel.updateCron(source, jobId, name, prompt, schedule, deliver)
+            },
             deleteCron = viewModel::deleteCron,
+            deleteCronAt = { source, jobId -> viewModel.deleteCron(source, jobId) },
             refreshProfiles = viewModel::refreshProfiles,
             refreshBotRoster = viewModel::refreshBotRoster,
             botDirectChat = viewModel::botDirectChat,
@@ -516,13 +544,20 @@ fun HermesApp(
             updateBotGroup = viewModel::updateBotGroup,
             disbandBotGroup = viewModel::disbandBotGroup,
             sendBotGroupMessage = viewModel::sendBotGroupMessage,
+            readBotGroupAttachments = viewModel::readBotGroupAttachments,
             acknowledgeBotGroup = viewModel::acknowledgeBotGroup,
             answerBotGroupBlocking = viewModel::answerBotGroupBlocking,
             describeBotAgent = viewModel::describeBotAgent,
+            describeBotAgentAt = { backendId, profile -> viewModel.describeBotAgent(backendId, profile) },
             createBotAgent = viewModel::createBotAgent,
             configureBotAgent = viewModel::configureBotAgent,
+            configureBotAgentAt = { backendId, draft -> viewModel.configureBotAgent(backendId, draft) },
             profileAvatar = viewModel::profileAvatar,
             botProfileAvatar = viewModel::botProfileAvatar,
+            setProfileAvatarAt = { backendId, profile, data -> viewModel.setProfileAvatar(backendId, profile, data) },
+            generateProfileAvatarAt = { backendId, profile, prompt -> viewModel.generateProfileAvatar(backendId, profile, prompt) },
+            profilePetGalleryAt = { backendId, profile -> viewModel.profilePetGallery(backendId, profile) },
+            adoptProfilePetAt = { backendId, profile, slug -> viewModel.adoptProfilePet(backendId, profile, slug) },
             setProfileAvatar = viewModel::setProfileAvatar,
             generateProfileAvatar = viewModel::generateProfileAvatar,
             profilePetGallery = viewModel::profilePetGallery,
@@ -531,8 +566,13 @@ fun HermesApp(
             setActiveProfile = viewModel::setActiveProfile,
             deleteProfile = viewModel::deleteProfile,
             profileIdentity = viewModel::profileIdentity,
+            profileIdentityAt = { backendId, profile -> viewModel.profileIdentity(backendId, profile) },
             saveProfileSoul = viewModel::saveProfileSoul,
+            saveProfileSoulAt = { backendId, profile, content -> viewModel.saveProfileSoul(backendId, profile, content) },
             saveProfileModel = viewModel::saveProfileModel,
+            saveProfileModelAt = { backendId, profile, provider, model ->
+                viewModel.saveProfileModel(backendId, profile, provider, model)
+            },
             refreshStarmap = viewModel::refreshStarmap,
             loadLearningNode = viewModel::loadLearningNode,
             closeLearningNode = viewModel::closeLearningNode,
@@ -583,7 +623,16 @@ fun HermesApp(
     val navigator = remember(appNavController) { HermesNavigator(appNavController) }
     val currentEntry by appNavController.currentBackStackEntryAsState()
     var recoveryNotice by remember { mutableStateOf<String?>(null) }
-    val transientMessage = if (state.backend != null) recoveryNotice ?: state.error else null
+    val routeShowsGlobalErrors = currentEntry?.destination?.let { destination ->
+        destination.hasRoute<HermesDestinationRoute.Chats>() ||
+            destination.hasRoute<HermesRoute.SessionAtlas>() ||
+            destination.hasRoute<HermesRoute.Conversation>()
+    } == true
+    val transientMessage = if (state.backend != null) {
+        recoveryNotice ?: state.error.takeIf { routeShowsGlobalErrors }
+    } else {
+        null
+    }
     val initialRoute = remember(startupReady, state.backend?.id, state.status != null) {
         initialHermesRoute(startupReady, state)
     }
@@ -1206,6 +1255,7 @@ internal fun botModeRuntimeReady(
     state: HermesState,
     connection: GatewayConnectionState,
 ): Boolean = enabled &&
+    state.botModeProtocolSupported &&
     connection == GatewayConnectionState.Open &&
     state.restoration.mutationsEnabled &&
     !state.backendTransitionInProgress
@@ -1281,7 +1331,8 @@ private fun HermesWorkspace(
         val composerAdaptiveFocusState = rememberAdaptiveFocusState()
         val backendId = requireNotNull(state.backend).id
         val profileId = route.profileIdOr(state.currentProfile)
-        val botRuntimeReady = botModeRuntimeReady(botModeEnabled, state, connection)
+        val botModeAvailable = botModeEnabled && state.botModeProtocolSupported
+        val botRuntimeReady = botModeRuntimeReady(botModeAvailable, state, connection)
         LaunchedEffect(botRuntimeReady, backendId) {
             if (!botRuntimeReady) return@LaunchedEffect
             var cronPoll = 0
@@ -1301,14 +1352,18 @@ private fun HermesWorkspace(
         var requestedProfileEditor by rememberSaveable(backendId) { mutableStateOf<String?>(null) }
         var selectedBotGroupId by rememberSaveable(backendId) { mutableStateOf<String?>(null) }
         var editingBotGroupId by rememberSaveable(backendId) { mutableStateOf<String?>(null) }
-        var routineBotProfile by rememberSaveable(backendId) { mutableStateOf<String?>(null) }
+        var routineBot by remember(backendId) { mutableStateOf<BotConversation?>(null) }
         var remoteBot by remember(backendId) { mutableStateOf<BotConversation?>(null) }
-        LaunchedEffect(botModeEnabled) {
-            if (!botModeEnabled) {
+        var remoteBotFresh by remember(backendId) { mutableStateOf(false) }
+        var remoteProfileEditor by remember(backendId) { mutableStateOf<BotConversation?>(null) }
+        LaunchedEffect(botModeAvailable) {
+            if (!botModeAvailable) {
                 selectedBotGroupId = null
                 editingBotGroupId = null
-                routineBotProfile = null
+                routineBot = null
                 remoteBot = null
+                remoteBotFresh = false
+                remoteProfileEditor = null
             }
         }
         if (botRuntimeReady) BotActivityNotifications(state)
@@ -1380,6 +1435,15 @@ private fun HermesWorkspace(
                     session?.let(openStoredSession)
                 }
             } else {
+                remoteBotFresh = false
+                remoteBot = bot
+            }
+        }
+        val newBotSession: (BotConversation) -> Unit = { bot ->
+            if (bot.backendId.isBlank() || bot.backendId == backendId) {
+                createConversation(bot.profile.name)
+            } else {
+                remoteBotFresh = true
                 remoteBot = bot
             }
         }
@@ -1387,11 +1451,15 @@ private fun HermesWorkspace(
             navigator.openManage(backendId, profileId, ManageSection.PROFILES_AND_MODELS, ManageDestination.PROFILES)
         }
         val editBot: (BotConversation) -> Unit = { bot ->
-            requestedProfileEditor = bot.profile.name
-            openProfiles()
+            if (bot.backendId.isBlank() || bot.backendId == backendId) {
+                requestedProfileEditor = bot.profile.name
+                openProfiles()
+            } else {
+                remoteProfileEditor = bot
+            }
         }
         val openBotRoutines: (BotConversation) -> Unit = { bot ->
-            routineBotProfile = bot.profile.name
+            routineBot = bot
         }
         val openBotGroup: (com.nousresearch.hermes.protocol.BotGroupRoom) -> Unit = { room ->
             selectedBotGroupId = room.roomId
@@ -1513,6 +1581,7 @@ private fun HermesWorkspace(
                         onSend = { text, thread, attachments ->
                             managementActions.sendBotGroupMessage(selectedBotGroup.roomId, text, thread, attachments)
                         },
+                        onReadAttachments = managementActions.readBotGroupAttachments,
                         onEdit = { editingBotGroupId = selectedBotGroup.roomId },
                         blockingRequests = state.botGroups.blockingRequests.filter { it.roomId == selectedBotGroup.roomId },
                         onAnswerBlocking = managementActions.answerBotGroupBlocking,
@@ -1526,7 +1595,7 @@ private fun HermesWorkspace(
                         onApprove, onClarify, onSensitiveInput, modelActions, sessionActions, queueActions,
                         Modifier.weight(1f),
                         compactLayout = compact,
-                        mentionCandidates = if (botModeEnabled) botGroupCandidates else emptyList(),
+                        mentionCandidates = if (botModeAvailable) botGroupCandidates else emptyList(),
                         adaptiveFocusState = composerAdaptiveFocusState,
                         expandedToolIds = expandedToolIds.toSet(),
                         toolDisclosureKey = { tool ->
@@ -1790,7 +1859,7 @@ private fun HermesWorkspace(
                             onArchiveSession = onArchiveSession,
                             onPinSession = onPinSession,
                             onNewSession = { createConversation(null) },
-                            onNewBotSession = { createConversation(it.profile.name) },
+                            onNewBotSession = newBotSession,
                             onArtifacts = { navigator.openArtifacts(backendId, profileId) },
                             onAutomations = { navigator.openAutomations(backendId, profileId) },
                             onManage = { navigator.openManage(backendId, profileId) },
@@ -1801,7 +1870,8 @@ private fun HermesWorkspace(
                             onBotRoutines = openBotRoutines,
                             onAppSettings = { navigator.openAppSettings() },
                             onBackends = { navigate(WorkspaceContent.BACKENDS) },
-                            botModeEnabled = botModeEnabled,
+                            botModeEnabled = botModeAvailable,
+                            botModeCompatibilityNotice = botModeEnabled && !state.botModeProtocolSupported,
                             compact = true,
                             modifier = Modifier.weight(1f).fillMaxHeight(),
                         )
@@ -1819,6 +1889,49 @@ private fun HermesWorkspace(
             filesPath: String? = null,
             conversationReady: Boolean = true,
         ) {
+            remoteProfileEditor?.let { bot ->
+                ProfilesScreen(
+                    state = state.copy(
+                        profiles = listOf(bot.profile),
+                        activeProfile = "",
+                        currentProfile = "",
+                        managementLoading = false,
+                        error = null,
+                    ),
+                    onRefresh = {},
+                    onStartSession = {
+                        remoteProfileEditor = null
+                        remoteBot = bot
+                    },
+                    onRename = { _, _ -> },
+                    onSetActive = {},
+                    onDelete = {},
+                    onLoadIdentity = { profile -> managementActions.profileIdentityAt(bot.backendId, profile) },
+                    onSaveSoul = { profile, content -> managementActions.saveProfileSoulAt(bot.backendId, profile, content) },
+                    onSaveModel = { profile, provider, model ->
+                        managementActions.saveProfileModelAt(bot.backendId, profile, provider, model)
+                    },
+                    onDescribeAgent = { profile -> managementActions.describeBotAgentAt(bot.backendId, profile) },
+                    onCreateAgent = managementActions.createBotAgent,
+                    onConfigureAgent = { draft -> managementActions.configureBotAgentAt(bot.backendId, draft) },
+                    onLoadAvatar = { profile -> managementActions.botProfileAvatar(bot.backendId, profile) },
+                    onSetAvatar = { profile, data -> managementActions.setProfileAvatarAt(bot.backendId, profile, data) },
+                    onGenerateAvatar = { profile, prompt ->
+                        managementActions.generateProfileAvatarAt(bot.backendId, profile, prompt)
+                    },
+                    onLoadPets = { profile -> managementActions.profilePetGalleryAt(bot.backendId, profile) },
+                    onAdoptPet = { profile, slug -> managementActions.adoptProfilePetAt(bot.backendId, profile, slug) },
+                    onOpenAgentChat = { _, _ ->
+                        remoteProfileEditor = null
+                        remoteBot = bot
+                    },
+                    initialEditProfile = bot.profile.name,
+                    profileAdministrationEnabled = false,
+                    onBack = { remoteProfileEditor = null },
+                    modifier = Modifier.fillMaxSize(),
+                )
+                return
+            }
             AdaptiveWorkspaceShell(
                 configuration = workspaceConfiguration,
                 destination = destination,
@@ -1843,7 +1956,7 @@ private fun HermesWorkspace(
                         onArchiveSession = onArchiveSession,
                         onPinSession = onPinSession,
                         onNewSession = { createConversation(null) },
-                        onNewBotSession = { createConversation(it.profile.name) },
+                        onNewBotSession = newBotSession,
                         onArtifacts = { navigator.openArtifacts(backendId, profileId) },
                         onAutomations = { navigator.openAutomations(backendId, profileId) },
                         onManage = { navigator.openManage(backendId, profileId) },
@@ -1854,7 +1967,8 @@ private fun HermesWorkspace(
                         onBotRoutines = openBotRoutines,
                         onAppSettings = { navigator.openAppSettings() },
                         onBackends = { navigate(WorkspaceContent.BACKENDS) },
-                        botModeEnabled = botModeEnabled,
+                        botModeEnabled = botModeAvailable,
+                        botModeCompatibilityNotice = botModeEnabled && !state.botModeProtocolSupported,
                         modifier = Modifier.width(330.dp).fillMaxHeight(),
                     )
                     HorizontalDivider(Modifier.fillMaxHeight().width(1.dp))
@@ -1918,29 +2032,37 @@ private fun HermesWorkspace(
                 },
             )
         }
-        routineBotProfile?.let { owner ->
+        routineBot?.let { bot ->
+            val owner = bot.profile.name
+            val sourceBackendId = bot.backendId.ifBlank { backendId }
             BotRoutinesDialog(
                 state = state,
                 owner = owner,
-                onRefresh = { managementActions.refreshBotRoutines(owner) },
-                onSetEnabled = managementActions.setCronEnabled,
-                onTrigger = managementActions.triggerCron,
-                onLoadRuns = managementActions.refreshCronRuns,
-                onOpenRun = openStoredSession,
-                onCreate = { name, prompt, schedule, deliver ->
-                    managementActions.createBotRoutine(owner, name, prompt, schedule, deliver)
+                onRefresh = { managementActions.refreshBotRoutinesAt(sourceBackendId, owner) },
+                onSetEnabled = { jobId, enabled -> managementActions.setCronEnabledAt(sourceBackendId, jobId, enabled) },
+                onTrigger = { jobId -> managementActions.triggerCronAt(sourceBackendId, jobId) },
+                onLoadRuns = { jobId -> managementActions.refreshCronRunsAt(sourceBackendId, jobId) },
+                onOpenRun = { run ->
+                    if (sourceBackendId == backendId) openStoredSession(run) else remoteBot = bot
                 },
-                onUpdate = managementActions.updateCron,
-                onDelete = managementActions.deleteCron,
-                onDismiss = { routineBotProfile = null },
+                onCreate = { name, prompt, schedule, deliver ->
+                    managementActions.createBotRoutineAt(sourceBackendId, owner, name, prompt, schedule, deliver)
+                },
+                onUpdate = { jobId, name, prompt, schedule, deliver ->
+                    managementActions.updateCronAt(sourceBackendId, jobId, name, prompt, schedule, deliver)
+                },
+                onDelete = { jobId -> managementActions.deleteCronAt(sourceBackendId, jobId) },
+                onDismiss = { routineBot = null },
             )
         }
         remoteBot?.let { bot ->
             BotDirectChatDialog(
                 bot = bot,
-                onLoad = { managementActions.botDirectChat(bot.backendId, bot.profile.name, null) },
-                onSend = { text -> managementActions.botDirectChat(bot.backendId, bot.profile.name, text) },
-                onDismiss = { remoteBot = null },
+                onLoad = { managementActions.botDirectChat(bot.backendId, bot.profile.name, null, null, remoteBotFresh) },
+                onSend = { text, sessionId ->
+                    managementActions.botDirectChat(bot.backendId, bot.profile.name, text, sessionId, false)
+                },
+                onDismiss = { remoteBot = null; remoteBotFresh = false },
             )
         }
 
@@ -2192,6 +2314,7 @@ internal fun SessionRail(
     onAppSettings: () -> Unit,
     onBackends: () -> Unit,
     botModeEnabled: Boolean,
+    botModeCompatibilityNotice: Boolean = false,
     compact: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
@@ -2341,6 +2464,12 @@ internal fun SessionRail(
                     }
                 }
                 ConnectionLine(connection)
+                if (botModeCompatibilityNotice) {
+                    CompatibilityBanner(
+                        "This Hermes server does not support Bot mode yet. Sessions remain available; update Hermes to add agents, groups and routines.",
+                        Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+                    )
+                }
                 if (state.sessionListLoading) LinearProgressIndicator(Modifier.fillMaxWidth())
                 if (botModeEnabled) {
                     BotInboxSelector(inboxMode) { inboxMode = it }
@@ -2452,13 +2581,9 @@ internal fun SessionRail(
                                 onToggleHidden = {
                                     onSetBotHidden(bot.backendId, bot.profile.name, !bot.hidden)
                                 },
-                                onEdit = if (bot.backendId == state.backend?.id) ({ onEditBot(bot) }) else null,
-                                onRoutines = if (bot.backendId == state.backend?.id) ({ onBotRoutines(bot) }) else null,
-                                onNewSession = if (bot.backendId.isBlank() || bot.backendId == state.backend?.id) {
-                                    { onNewBotSession(bot) }
-                                } else {
-                                    null
-                                },
+                                onEdit = { onEditBot(bot) },
+                                onRoutines = { onBotRoutines(bot) },
+                                onNewSession = { onNewBotSession(bot) },
                                 avatarData = botAvatars[bot.sourceKey],
                             )
                         }

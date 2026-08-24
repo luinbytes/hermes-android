@@ -62,7 +62,11 @@ class AdaptiveWorkspaceScreenshotTest {
     private fun captureProductionShellMatrixFrame(mode: String) {
         // The Pixel 2 runs the compact golden; wide goldens run on the Pixel Tablet.
         if (mode != "compact") {
-            assumeTrue("Wide adaptive shell goldens require the API 36 tablet", Build.VERSION.SDK_INT >= 29)
+            assumeTrue(
+                "Wide adaptive shell goldens require the API 36 tablet",
+                Build.VERSION.SDK_INT >= 29 &&
+                    InstrumentationRegistry.getInstrumentation().targetContext.resources.configuration.smallestScreenWidthDp >= 600,
+            )
         }
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val goldenSize = when (mode) {
