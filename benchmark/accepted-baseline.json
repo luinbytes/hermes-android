@@ -3,8 +3,9 @@
   "source": {
     "workflowRun": 32758523116,
     "commit": "38f0aacd5dd1cd86db3abb9062a784dbb22b3586",
-    "supplementalWorkflowRun": 32769692422,
-    "supplementalCommit": "c0a29326f41cdae50a403468f4bd9282709f1313",
+    "priorWorkflowRun": 31522837823,
+    "priorCommit": "447acf6cb33550c295d74f5a15b6c1b54f98b5ed",
+    "supplementalWorkflowRuns": [32769692422, 32780433566],
     "device": "pixel6Api36",
     "androidApi": 36,
     "repetitions": {
@@ -19,17 +20,17 @@
     "coldStartupReportsTtidTtfdAndFrames.timeToInitialDisplayMs": 2789.570068,
     "artifactsJourney.memoryRssAnonLastKb": 51200.0,
     "artifactsJourney.memoryRssFileLastKb": 90212.0,
-    "manageJourney.memoryRssAnonLastKb": 48308.0,
-    "manageJourney.memoryRssFileLastKb": 81640.0,
+    "manageJourney.memoryRssAnonLastKb": 50314.0,
+    "manageJourney.memoryRssFileLastKb": 89600.0,
     "composerJourney.memoryRssAnonLastKb": 52340.0,
-    "composerJourney.memoryRssFileLastKb": 78124.0,
-    "transcriptScrollDuringContinuousStreamJourney.memoryRssAnonLastKb": 42484.0,
-    "transcriptScrollDuringContinuousStreamJourney.memoryRssFileLastKb": 62260.0,
+    "composerJourney.memoryRssFileLastKb": 91924.0,
+    "transcriptScrollDuringContinuousStreamJourney.memoryRssAnonLastKb": 44482.0,
+    "transcriptScrollDuringContinuousStreamJourney.memoryRssFileLastKb": 90002.0,
     "chatContinuousStreamJourney.memoryRssAnonLastKb": 48676.0,
-    "chatContinuousStreamJourney.memoryRssFileLastKb": 85908.0,
+    "chatContinuousStreamJourney.memoryRssFileLastKb": 89814.0,
     "atlasJourney.memoryRssAnonLastKb": 54756.0,
-    "atlasJourney.memoryRssFileLastKb": 87608.0,
+    "atlasJourney.memoryRssFileLastKb": 90384.0,
     "filesJourney.memoryRssAnonLastKb": 50744.0,
-    "filesJourney.memoryRssFileLastKb": 87776.0
+    "filesJourney.memoryRssFileLastKb": 90386.0
   }
 }
