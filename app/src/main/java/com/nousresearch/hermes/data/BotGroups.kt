@@ -118,12 +118,16 @@ internal fun BotGroupSnapshot.boundedForGateway(json: Json): BotGroupSnapshot {
         deleted = deleted.entries.sortedByDescending { it.value }.take(64).associate { it.toPair() },
     )
     while (groupGatewayJsonSize(json.encodeToString(BotGroupSnapshot.serializer(), bounded)) > 48_000) {
-        val oldest = bounded.rooms.entries.lastOrNull() ?: break
-        val room = oldest.value
+        val oldestWithLog = bounded.rooms.entries.lastOrNull { it.value.log.isNotEmpty() }
+        val roomWithImage = bounded.rooms.entries.lastOrNull { it.value.image != null }
         bounded = when {
-            room.log.size > 1 -> bounded.copy(rooms = bounded.rooms + (oldest.key to room.copy(log = room.log.drop(1))))
-            room.image != null -> bounded.copy(rooms = bounded.rooms + (oldest.key to room.copy(image = null)))
-            else -> bounded.copy(rooms = bounded.rooms - oldest.key)
+            oldestWithLog != null -> bounded.copy(
+                rooms = bounded.rooms + (oldestWithLog.key to oldestWithLog.value.copy(log = oldestWithLog.value.log.drop(1))),
+            )
+            roomWithImage != null -> bounded.copy(
+                rooms = bounded.rooms + (roomWithImage.key to roomWithImage.value.copy(image = null)),
+            )
+            else -> break
         }
     }
     require(groupGatewayJsonSize(json.encodeToString(BotGroupSnapshot.serializer(), bounded)) <= 48_000) {
