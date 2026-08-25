@@ -110,6 +110,34 @@ jobs:
           current_version="$(python3 scripts/release_version.py current --field name)"
           current_code="$(python3 scripts/release_version.py current --field code)"
 
+          if [[ -n "$latest_release_version" && "$(python3 scripts/release_version.py compare --left "$current_version" --right "$latest_release_version")" -gt 0 ]]; then
+            if [[ "$current_code" -le "$latest_release_code" ]]; then
+              echo "Pending release versionCode $current_code is not newer than latest published versionCode $latest_release_code" >&2
+              exit 1
+            fi
+            approval_sha="$(gh pr list \
+              --repo "$GITHUB_REPOSITORY" \
+              --base main \
+              --state merged \
+              --search "\"chore(release): v$current_version\" in:title" \
+              --limit 20 \
+              --json title,mergeCommit \
+              --jq '.[] | select(.title == "chore(release): v'"$current_version"'") | .mergeCommit.oid' \
+              | head -n 1)"
+            if [[ -z "$approval_sha" ]] || ! git merge-base --is-ancestor "$approval_sha" "$GITHUB_SHA"; then
+              echo "No approved chore(release): v$current_version merge exists on main" >&2
+              exit 1
+            fi
+            if gh api "/repos/$GITHUB_REPOSITORY/git/ref/tags/v$current_version" >/dev/null 2>&1; then
+              echo "Tag v$current_version already exists without being the latest release" >&2
+              exit 1
+            fi
+            echo "Resuming approved release v$current_version after main advanced from $approval_sha."
+            python3 scripts/release_version.py validate
+            set_outputs true "$current_version" "$current_code"
+            exit 0
+          fi
+
           if [[ "$merged_pr_title" =~ ^chore\(release\):[[:space:]]v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
             version="$current_version"
             version_code="$current_code"
