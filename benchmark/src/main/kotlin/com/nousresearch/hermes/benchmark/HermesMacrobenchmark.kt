@@ -115,7 +115,16 @@ class HermesSurfaceJourneyBenchmark {
     ) {
         benchmarkRule.measureRepeated(
             packageName = TARGET_PACKAGE_NAME,
-            metrics = listOf(FrameTimingMetric(), MemoryUsageMetric(MemoryUsageMetric.Mode.Last)),
+            metrics = listOf(
+                FrameTimingMetric(),
+                MemoryUsageMetric(
+                    mode = MemoryUsageMetric.Mode.Last,
+                    subMetrics = listOf(
+                        MemoryUsageMetric.SubMetric.RssAnon,
+                        MemoryUsageMetric.SubMetric.RssFile,
+                    ),
+                ),
+            ),
             iterations = 3,
             startupMode = StartupMode.WARM,
             setupBlock = { pressHome() },

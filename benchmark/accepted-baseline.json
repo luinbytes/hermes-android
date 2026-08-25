@@ -1,39 +1,36 @@
 {
   "schemaVersion": 1,
   "source": {
-    "workflowRun": 31522837823,
-    "commit": "447acf6cb33550c295d74f5a15b6c1b54f98b5ed",
+    "workflowRun": 32758523116,
+    "commit": "38f0aacd5dd1cd86db3abb9062a784dbb22b3586",
+    "priorWorkflowRun": 31522837823,
+    "priorCommit": "447acf6cb33550c295d74f5a15b6c1b54f98b5ed",
+    "supplementalWorkflowRuns": [32769692422, 32780433566],
     "device": "pixel6Api36",
     "androidApi": 36,
     "repetitions": {
       "startup": 5,
-      "surface": 3
+      "surface": 3,
+      "passes": 3
     }
   },
   "regressionLimit": 0.1,
   "metrics": {
-    "coldStartupReportsTtidTtfdAndFrames.timeToFullDisplayMs": 4910.01,
-    "coldStartupReportsTtidTtfdAndFrames.timeToInitialDisplayMs": 3000.69,
-    "artifactsJourney.memoryHeapSizeLastKb": 11695.0,
-    "artifactsJourney.memoryRssAnonLastKb": 51050.0,
-    "artifactsJourney.memoryRssFileLastKb": 89874.0,
-    "manageJourney.memoryHeapSizeLastKb": 11997.0,
+    "coldStartupReportsTtidTtfdAndFrames.timeToFullDisplayMs": 4777.392402,
+    "coldStartupReportsTtidTtfdAndFrames.timeToInitialDisplayMs": 2789.570068,
+    "artifactsJourney.memoryRssAnonLastKb": 51200.0,
+    "artifactsJourney.memoryRssFileLastKb": 90212.0,
     "manageJourney.memoryRssAnonLastKb": 50314.0,
     "manageJourney.memoryRssFileLastKb": 89600.0,
-    "composerJourney.memoryHeapSizeLastKb": 10281.0,
-    "composerJourney.memoryRssAnonLastKb": 46990.0,
+    "composerJourney.memoryRssAnonLastKb": 52340.0,
     "composerJourney.memoryRssFileLastKb": 91924.0,
-    "transcriptScrollDuringContinuousStreamJourney.memoryHeapSizeLastKb": 6769.0,
     "transcriptScrollDuringContinuousStreamJourney.memoryRssAnonLastKb": 44482.0,
     "transcriptScrollDuringContinuousStreamJourney.memoryRssFileLastKb": 90002.0,
-    "chatContinuousStreamJourney.memoryHeapSizeLastKb": 10331.0,
-    "chatContinuousStreamJourney.memoryRssAnonLastKb": 47664.0,
+    "chatContinuousStreamJourney.memoryRssAnonLastKb": 48676.0,
     "chatContinuousStreamJourney.memoryRssFileLastKb": 89814.0,
-    "atlasJourney.memoryHeapSizeLastKb": 12561.0,
-    "atlasJourney.memoryRssAnonLastKb": 49752.0,
+    "atlasJourney.memoryRssAnonLastKb": 54756.0,
     "atlasJourney.memoryRssFileLastKb": 90384.0,
-    "filesJourney.memoryHeapSizeLastKb": 11329.0,
-    "filesJourney.memoryRssAnonLastKb": 50014.0,
+    "filesJourney.memoryRssAnonLastKb": 50744.0,
     "filesJourney.memoryRssFileLastKb": 90386.0
   }
 }
